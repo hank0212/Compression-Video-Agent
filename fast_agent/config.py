@@ -26,6 +26,16 @@ VIDEOMME_PARQUET = (
 VIDEO_DIR = "/local1/cfyang/.cache/huggingface/videomme/videomme/data"
 OUTPUT_DIR = "/local1/cfyang/hanklin/outputs/fast_agent"
 
+# LVBench (zai-org snapshot; already complete on disk — see RESEARCH.md 2026-07-23).
+# The rich per-question evidence span lives ONLY in the .meta.jsonl (`time_reference`);
+# the flattened LVBench.tsv drops it, so the loader reads the jsonl.
+_LVBENCH_SNAP = (
+    "/local1/cfyang/.cache/huggingface/hub/datasets--zai-org--LVBench/snapshots/"
+    "0caedb92002cc268bad486449e551c76f0485670"
+)
+LVBENCH_META = os.path.join(_LVBENCH_SNAP, "video_info.meta.jsonl")
+LVBENCH_VIDEO_DIR = os.path.join(_LVBENCH_SNAP, "videos")
+
 # ---- sampling (paper-faithful base settings: fps=1, 224px) ----
 FPS = 1
 MAX_PIXELS = 224 * 224          # per-frame pixel budget (both tools + initial view)
@@ -74,6 +84,13 @@ FLASHVID_KW = dict(
     temporal_threshold=0.8,
     expansion=1.0,               # keep budget math exact (walkthrough default 1.25)
 )
+
+# ---- oracle arm (LVBench only; forced coarse->fine from GT time_reference) ----
+# Compress step covers an evidence-WIDENED window (evidence span +/- margin), clamped
+# to the video; crop step targets the GT evidence span, widened to a min floor so a
+# tight (or zero-width) reference still yields enough full-detail frames.
+ORACLE_COMPRESS_MARGIN = 300.0   # +/- seconds around the evidence span for the compress scope
+ORACLE_CROP_MIN_WIDTH = 16.0     # minimum crop-window width (seconds) for tight refs
 
 # ---- agent loop ----
 MAX_ROUNDS = 5                   # tool rounds before tools are withheld

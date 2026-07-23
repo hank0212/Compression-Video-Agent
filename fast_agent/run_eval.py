@@ -70,6 +70,8 @@ def write_summary(run_dir: str, arm: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arm", required=True, choices=list(ARM_TOOLS))
+    ap.add_argument("--dataset", default="videomme", choices=["videomme", "lvbench"],
+                    help="benchmark to eval (default videomme; existing launch scripts unaffected)")
     ap.add_argument("--num", type=int, default=None, help="total samples before sharding")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
@@ -77,7 +79,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    run_dir = os.path.join(config.RUN_ROOT, f"{args.arm}_{args.tag}")
+    run_dir = os.path.join(config.RUN_ROOT, f"{args.dataset}_{args.arm}_{args.tag}")
     os.makedirs(run_dir, exist_ok=True)
     results_path = os.path.join(run_dir, "results.jsonl")
 
@@ -87,6 +89,7 @@ def main():
     if not os.path.exists(manifest_path):
         with open(manifest_path, "w") as mf:
             json.dump({"schema_version": 2, "arm": args.arm, "tag": args.tag,
+                       "dataset": args.dataset,
                        "num": args.num, "seed": args.seed,
                        "shard": args.shard, "num_shards": args.num_shards,
                        "tools": list(ARM_TOOLS[args.arm]),
@@ -95,7 +98,7 @@ def main():
                        "max_rounds": config.MAX_ROUNDS,
                        "max_new_tokens": config.MAX_NEW_TOKENS}, mf, indent=1)
 
-    rows = data.load_long_split(n=args.num, seed=args.seed)
+    rows = data.load_dataset(args.dataset, n=args.num, seed=args.seed)
     # Shard by VIDEO (not question index) so all questions of one video land on the
     # same worker — avoids concurrent AV1-proxy transcodes racing on the same file.
     def _shard_of(vid: str) -> int:
