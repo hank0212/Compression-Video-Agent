@@ -1,0 +1,125 @@
+{
+  "compression_input_frames": {
+    "count": 300,
+    "resolution_hw": [
+      160,
+      288
+    ],
+    "tensor": [
+      300,
+      3,
+      160,
+      288
+    ]
+  },
+  "flashvid_boundary": {
+    "cls_attention_before_flashvid": [
+      150,
+      45
+    ],
+    "deepstack_before_flashvid": [
+      [
+        6750,
+        4096
+      ],
+      [
+        6750,
+        4096
+      ],
+      [
+        6750,
+        4096
+      ]
+    ],
+    "finite": {
+      "cls_attention": true,
+      "deepstack": true,
+      "pixel_values": true,
+      "video_features": true,
+      "vision_hidden": true
+    },
+    "grid_thw": [
+      1,
+      3
+    ],
+    "input_video_tensor": [
+      300,
+      3,
+      160,
+      288
+    ],
+    "processor_pixel_values": [
+      27000,
+      1536
+    ],
+    "video_features_before_flashvid": [
+      150,
+      45,
+      4096
+    ],
+    "vision_hidden": [
+      6750,
+      4096
+    ]
+  },
+  "flashvid_tokens": {
+    "after": 5895,
+    "before": 6750,
+    "expected_budget": 5760,
+    "keep_indices": [
+      5895
+    ],
+    "retention": 0.8533333333333334
+  },
+  "generation_1": {
+    "deepstack": [
+      [
+        8775,
+        4096
+      ],
+      [
+        8775,
+        4096
+      ],
+      [
+        8775,
+        4096
+      ]
+    ],
+    "finite": {
+      "input_embeds": true,
+      "position_ids": true
+    },
+    "input_embeds": [
+      1,
+      10513,
+      4096
+    ],
+    "kept_input_ids": [
+      1,
+      10513
+    ],
+    "position_ids_mrope": [
+      3,
+      1,
+      10513
+    ],
+    "visual_mask": [
+      1,
+      10513
+    ]
+  },
+  "initial_frames": {
+    "count": 64,
+    "resolution_hw": [
+      160,
+      288
+    ]
+  },
+  "inserted_visual_text_context": {
+    "found": true,
+    "placeholder": "<|vision_start|><|video_pad|><|vision_end|>",
+    "text_after": "<|im_end|>\n<|im_start|>assistant\n",
+    "text_before": "does the Ross Ice Shelf team consist of?\nA. 2.\nB. 23.\nC. 12.\nD. 8.\n\nThis video is 2840 seconds long. The 64 frames above are uniformly sampled from 0s to 2840s.\n\nThink first inside <think></think> tags. If you need to inspect the video more closely, call one tool; otherwise give your final answer as <answer>X</answer> where X is one of the option letters A, B, C, or D.\n\nForced diagnostic compression for 0.0s-300.0s: 300 source frames became 5895 visual tokens. Use this visual evidence to answer."
+  }
+}

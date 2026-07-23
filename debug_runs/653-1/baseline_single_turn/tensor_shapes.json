@@ -1,0 +1,47 @@
+{
+  "generation_1": {
+    "deepstack": [
+      [
+        2880,
+        4096
+      ],
+      [
+        2880,
+        4096
+      ],
+      [
+        2880,
+        4096
+      ]
+    ],
+    "finite": {
+      "input_embeds": true,
+      "position_ids": true
+    },
+    "input_embeds": [
+      1,
+      3133,
+      4096
+    ],
+    "kept_input_ids": [
+      1,
+      3133
+    ],
+    "position_ids_mrope": [
+      3,
+      1,
+      3133
+    ],
+    "visual_mask": [
+      1,
+      3133
+    ]
+  },
+  "initial_frames": {
+    "count": 64,
+    "resolution_hw": [
+      160,
+      288
+    ]
+  }
+}

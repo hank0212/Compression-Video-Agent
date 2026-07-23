@@ -1,0 +1,54 @@
+{
+  "crop_frames": {
+    "count": 128,
+    "resolution_hw": [
+      160,
+      288
+    ]
+  },
+  "generation_1": {
+    "deepstack": [
+      [
+        8640,
+        4096
+      ],
+      [
+        8640,
+        4096
+      ],
+      [
+        8640,
+        4096
+      ]
+    ],
+    "finite": {
+      "input_embeds": true,
+      "position_ids": true
+    },
+    "input_embeds": [
+      1,
+      9182,
+      4096
+    ],
+    "kept_input_ids": [
+      1,
+      9182
+    ],
+    "position_ids_mrope": [
+      3,
+      1,
+      9182
+    ],
+    "visual_mask": [
+      1,
+      9182
+    ]
+  },
+  "initial_frames": {
+    "count": 64,
+    "resolution_hw": [
+      160,
+      288
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "compress_max_frames": 2128,
+  "crop_max_frames": 128,
+  "fixed_retention": 0.1,
+  "initial_frames": 64,
+  "manual_time_range_seconds": [
+    0.0,
+    300.0
+  ],
+  "max_new_tokens": 2048,
+  "mode": "autonomous_tools",
+  "model_snapshot": "/local1/cfyang/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/0c351dd01ed87e9c1b53cbc748cba10e6187ff3b",
+  "question_id": "653-1",
+  "video_id": "YtAL8y2lACs",
+  "video_path": "/local1/cfyang/.cache/huggingface/videomme/videomme/data/YtAL8y2lACs.mp4"
+}

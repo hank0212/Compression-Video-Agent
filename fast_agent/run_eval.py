@@ -1,0 +1,153 @@
+"""VideoMME-long eval runner (batch=1; shard across GPUs with --shard/--num-shards).
+
+Each run writes to config.RUN_ROOT/<arm>_<tag>/:
+  results.jsonl   one line per sample (question_id, pred, gold, correct, tool_calls, traj_path)
+  summary.json    live accuracy overall + per-task-type (rewritten each sample, all shards merged)
+  traj/<qid>.json full replayable trajectory (thinking, actions, montage paths)
+  media/<qid>/    frame montages (initial skim + each tool call)
+
+  CUDA_VISIBLE_DEVICES=3 python -m fast_agent.run_eval --arm compress --n 200 --shard 0 --num-shards 3
+
+Resumable: re-running skips question_ids already in results.jsonl.
+"""
+
+import argparse
+import glob
+import hashlib
+import json
+import os
+import time
+from collections import defaultdict
+
+from tqdm import tqdm
+
+from . import config, data
+from .agent_loop import run_sample
+from .model import Engine
+
+ARM_TOOLS = {
+    "baseline": (),
+    "crop": ("crop_video",),
+    "compress": ("crop_video", "compress_video"),   # "crop + compression"
+}
+
+
+def write_summary(run_dir: str, arm: str):
+    by_task, total = defaultdict(lambda: [0, 0]), [0, 0]
+    tool_hist = defaultdict(int)
+    strict_ok = fin_used = 0
+    for p in glob.glob(os.path.join(run_dir, "results.jsonl")):
+        with open(p) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                ok = bool(r.get("correct"))
+                by_task[r["task_type"]][0] += ok
+                by_task[r["task_type"]][1] += 1
+                total[0] += ok
+                total[1] += 1
+                strict_ok += bool(r.get("correct_strict"))
+                fin_used += bool(r.get("finalizer_used"))
+                for c in r.get("tool_calls", []):
+                    tool_hist[c["name"]] += 1
+    n = max(total[1], 1)
+    summary = {
+        "arm": arm,
+        "n": total[1],
+        "accuracy": round(100 * total[0] / n, 2),          # lenient (headline)
+        "accuracy_strict": round(100 * strict_ok / n, 2),  # pre-finalizer, LongVT-faithful
+        "finalizer_rate": round(100 * fin_used / n, 1),    # % of samples that needed the finalizer
+        "by_task": {t: {"correct": c, "n": n_t, "acc": round(100 * c / max(n_t, 1), 1)}
+                    for t, (c, n_t) in sorted(by_task.items())},
+        "tool_calls": dict(tool_hist),
+    }
+    with open(os.path.join(run_dir, "summary.json"), "w") as f:
+        json.dump(summary, f, indent=1)
+    return summary
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--arm", required=True, choices=list(ARM_TOOLS))
+    ap.add_argument("--num", type=int, default=None, help="total samples before sharding")
+    ap.add_argument("--shard", type=int, default=0)
+    ap.add_argument("--num-shards", type=int, default=1)
+    ap.add_argument("--tag", default=time.strftime("%m%d"))
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+
+    run_dir = os.path.join(config.RUN_ROOT, f"{args.arm}_{args.tag}")
+    os.makedirs(run_dir, exist_ok=True)
+    results_path = os.path.join(run_dir, "results.jsonl")
+
+    # A small immutable manifest makes a run auditable without duplicating
+    # model weights or raw video.  Per-sample reasoning remains in traj/*.json.
+    manifest_path = os.path.join(run_dir, "run_manifest.json")
+    if not os.path.exists(manifest_path):
+        with open(manifest_path, "w") as mf:
+            json.dump({"schema_version": 2, "arm": args.arm, "tag": args.tag,
+                       "num": args.num, "seed": args.seed,
+                       "shard": args.shard, "num_shards": args.num_shards,
+                       "tools": list(ARM_TOOLS[args.arm]),
+                       "model_snapshot": config.MODEL_SNAPSHOT,
+                       "initial_frames": config.INITIAL_FRAMES,
+                       "max_rounds": config.MAX_ROUNDS,
+                       "max_new_tokens": config.MAX_NEW_TOKENS}, mf, indent=1)
+
+    rows = data.load_long_split(n=args.num, seed=args.seed)
+    # Shard by VIDEO (not question index) so all questions of one video land on the
+    # same worker — avoids concurrent AV1-proxy transcodes racing on the same file.
+    def _shard_of(vid: str) -> int:
+        return int(hashlib.md5(vid.encode()).hexdigest(), 16) % args.num_shards
+    rows = [r for r in rows if _shard_of(r["videoID"]) == args.shard]
+
+    done = set()
+    if os.path.exists(results_path):
+        with open(results_path) as f:
+            done = {json.loads(l)["question_id"] for l in f if l.strip()}
+    rows = [r for r in rows if str(r["question_id"]) not in done]
+    print(f"[eval] arm={args.arm} shard={args.shard}/{args.num_shards} "
+          f"todo={len(rows)} (skipped {len(done)}) -> {run_dir}")
+
+    engine = Engine()
+    t0 = time.time()
+    # ascii + mininterval keeps the nohup logfile readable (non-tty tqdm otherwise
+    # prints one bar line per refresh). tqdm.write lines stay the durable record.
+    bar = tqdm(rows, desc=f"{args.arm}/{args.tag}", ascii=True, mininterval=30,
+               dynamic_ncols=True)
+    with open(results_path, "a") as f:
+        for i, row in enumerate(bar):
+            t = time.time()
+            try:
+                r = run_sample(engine, row, tool_names=ARM_TOOLS[args.arm],
+                               record_dir=run_dir)
+            except Exception as e:  # per-sample isolation
+                import traceback
+                traceback.print_exc()
+                r = {"question_id": str(row["question_id"]), "task_type": row["task_type"],
+                     "pred": None, "pred_strict": None, "pred_lenient": None,
+                     "finalizer_used": False, "gold": row["answer"], "correct": False,
+                     "correct_strict": False, "tool_calls": [], "error": f"{type(e).__name__}: {e}"}
+            f.write(json.dumps(r) + "\n")
+            f.flush()
+            s = write_summary(run_dir, args.arm)  # live accuracy after every sample
+            bar.set_postfix(acc=f"{s['accuracy']}%", strict=f"{s['accuracy_strict']}%",
+                            n=s["n"], avg=f"{(time.time()-t0)/(i+1):.0f}s")
+            tqdm.write(
+                f"[{i+1}/{len(rows)}] {row['question_id']} pred={r.get('pred')} "
+                f"gold={r['gold']} ok={r.get('correct')} rounds={r.get('rounds','-')} "
+                f"{time.time()-t:.0f}s | acc {s['accuracy']}% (strict {s['accuracy_strict']}%) "
+                f"n={s['n']} fin={s['finalizer_rate']}%")
+    bar.close()
+
+    s = write_summary(run_dir, args.arm)
+    print(f"\n[SUMMARY {args.arm}/{args.tag}] lenient {s['accuracy']}% | "
+          f"strict {s['accuracy_strict']}% | finalizer {s['finalizer_rate']}% over n={s['n']}")
+    for t, d in s["by_task"].items():
+        print(f"  {t:<28} {d['correct']:>3}/{d['n']:<3} = {d['acc']}%")
+    print(f"  tool calls: {s['tool_calls']}")
+
+
+if __name__ == "__main__":
+    main()
