@@ -21,14 +21,15 @@ from collections import defaultdict
 
 from tqdm import tqdm
 
-from . import config, data
+from . import config, data, oracle
 from .agent_loop import run_sample
 from .model import Engine
 
 ARM_TOOLS = {
     "baseline": (),
     "crop": ("crop_video",),
-    "compress": ("crop_video", "compress_video"),   # "crop + compression"
+    "compress": ("crop_video", "compress_video"),   # "crop + compression" (autonomous)
+    "oracle": ("compress_video", "crop_video"),      # forced coarse->fine (LVBench only)
 }
 
 
@@ -99,6 +100,13 @@ def main():
                        "max_new_tokens": config.MAX_NEW_TOKENS}, mf, indent=1)
 
     rows = data.load_dataset(args.dataset, n=args.num, seed=args.seed)
+    if args.arm == "oracle":
+        if args.dataset != "lvbench":
+            ap.error("--arm oracle requires --dataset lvbench (needs per-question evidence timestamps)")
+        n_before = len(rows)
+        rows = [r for r in rows if r.get("evidence")]
+        if len(rows) < n_before:
+            print(f"[eval] oracle: skipped {n_before - len(rows)} rows without usable evidence")
     # Shard by VIDEO (not question index) so all questions of one video land on the
     # same worker — avoids concurrent AV1-proxy transcodes racing on the same file.
     def _shard_of(vid: str) -> int:
@@ -123,8 +131,11 @@ def main():
         for i, row in enumerate(bar):
             t = time.time()
             try:
-                r = run_sample(engine, row, tool_names=ARM_TOOLS[args.arm],
-                               record_dir=run_dir)
+                if args.arm == "oracle":
+                    r = oracle.run_oracle_sample(engine, row, record_dir=run_dir)
+                else:
+                    r = run_sample(engine, row, tool_names=ARM_TOOLS[args.arm],
+                                   record_dir=run_dir)
             except Exception as e:  # per-sample isolation
                 import traceback
                 traceback.print_exc()
