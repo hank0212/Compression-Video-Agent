@@ -25,11 +25,18 @@ from . import config, data, oracle
 from .agent_loop import run_sample
 from .model import Engine
 
+# Oracle arms (LVBench only): forced GT-region evidence, then answer. The arm name maps
+# to the forced-evidence mode; oracle_crop is the primary "is perception enough given
+# perfect localization" instrument, the other two isolate the compression form.
+ORACLE_ARMS = {"oracle_crop": "crop", "oracle_compress": "compress", "oracle_both": "both"}
+
 ARM_TOOLS = {
     "baseline": (),
     "crop": ("crop_video",),
     "compress": ("crop_video", "compress_video"),   # "crop + compression" (autonomous)
-    "oracle": ("compress_video", "crop_video"),      # forced coarse->fine (LVBench only)
+    "oracle_crop": ("crop_video",),                 # forced GT-region crop (PRIMARY)
+    "oracle_compress": ("compress_video",),         # forced GT-region compress
+    "oracle_both": ("compress_video", "crop_video"),# forced GT-region compress + crop
 }
 
 
@@ -94,19 +101,20 @@ def main():
                        "num": args.num, "seed": args.seed,
                        "shard": args.shard, "num_shards": args.num_shards,
                        "tools": list(ARM_TOOLS[args.arm]),
+                       "compressor": config.COMPRESSOR,
                        "model_snapshot": config.MODEL_SNAPSHOT,
                        "initial_frames": config.INITIAL_FRAMES,
                        "max_rounds": config.MAX_ROUNDS,
                        "max_new_tokens": config.MAX_NEW_TOKENS}, mf, indent=1)
 
     rows = data.load_dataset(args.dataset, n=args.num, seed=args.seed)
-    if args.arm == "oracle":
+    if args.arm in ORACLE_ARMS:
         if args.dataset != "lvbench":
-            ap.error("--arm oracle requires --dataset lvbench (needs per-question evidence timestamps)")
+            ap.error(f"--arm {args.arm} requires --dataset lvbench (needs per-question evidence timestamps)")
         n_before = len(rows)
         rows = [r for r in rows if r.get("evidence")]
         if len(rows) < n_before:
-            print(f"[eval] oracle: skipped {n_before - len(rows)} rows without usable evidence")
+            print(f"[eval] {args.arm}: skipped {n_before - len(rows)} rows without usable evidence")
     # Shard by VIDEO (not question index) so all questions of one video land on the
     # same worker — avoids concurrent AV1-proxy transcodes racing on the same file.
     def _shard_of(vid: str) -> int:
@@ -131,8 +139,9 @@ def main():
         for i, row in enumerate(bar):
             t = time.time()
             try:
-                if args.arm == "oracle":
-                    r = oracle.run_oracle_sample(engine, row, record_dir=run_dir)
+                if args.arm in ORACLE_ARMS:
+                    r = oracle.run_oracle_sample(engine, row, record_dir=run_dir,
+                                                 mode=ORACLE_ARMS[args.arm])
                 else:
                     r = run_sample(engine, row, tool_names=ARM_TOOLS[args.arm],
                                    record_dir=run_dir)
