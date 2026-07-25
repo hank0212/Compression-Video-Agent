@@ -144,7 +144,8 @@ def run_oracle_sample(engine, row: dict, record_dir: str | None = None,
         else:  # compress_video
             vt, times = tools.compress_tensor(row["video_path"], s2, e2)
             clip = engine.encode_video_compressed(
-                vt, target_tokens, times, meta={"role": "oracle_compress", "span": (s2, e2)}
+                vt, target_tokens, times, meta={"role": "oracle_compress", "span": (s2, e2)},
+                query_text=data.format_question(row),  # semvid only; flashvid ignores
             )
             note = (f"compress_video: compressed overview of {s2:.0f}s-{e2:.0f}s "
                     f"({vt.shape[0]} frames -> {clip.meta['kept_tokens']} tokens).")

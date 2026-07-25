@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import torch
 
 from . import config
+from . import semvid as semvid_lib
 
 sys.path.insert(0, config.FLASHVID_REPO)
 
@@ -179,10 +180,15 @@ class Engine:
         target_tokens: int,
         frame_times: list[float],
         meta: dict | None = None,
+        query_text: str | None = None,
     ) -> Clip:
-        """Encode a (T,C,H,W) uint8 clip as VIDEO modality and FlashVID-compress
-        to ~target_tokens. Faithful path: patched ViT last-block CLS attention →
-        DySeg + ADTS + TSTM merge (alpha=0.7). ViT runs exactly once."""
+        """Encode a (T,C,H,W) uint8 clip as VIDEO modality and compress to
+        ~target_tokens via config.COMPRESSOR. ViT runs exactly once either way.
+        - flashvid (default): patched ViT last-block CLS attention → DySeg +
+          ADTS + TSTM merge (alpha=0.7). Query-agnostic; query_text ignored.
+        - semvid: query-aware selection (semvid.py) on the same ViT output —
+          query_text drives frame budgets + object-token picks; keep-indices
+          are unique (selection, no merge anchors)."""
         import time
 
         self.apply_vision_patches()
@@ -222,7 +228,14 @@ class Engine:
         t_vit = time.time() - t0
 
         auto_r = retention_for_budget(base_tokens, target_tokens)
-        if config.FIXED_RETENTION > 0:
+        if config.COMPRESSOR == "semvid":
+            # SemVID keeps EXACTLY round(base*ratio) tokens (integer allocation,
+            # no segment-floor overshoot), so matched budget needs no calibrated
+            # fixed retention — the FlashVID FIXED_RETENTION/2128-frame-cap pair
+            # exists only to correct FlashVID's kept/base drift and would
+            # under-budget an exact selector by ~24% at r=0.1.
+            retention = auto_r
+        elif config.FIXED_RETENTION > 0:
             # On short spans, fixed retention would produce fewer tokens than
             # crop_video's budget and become a blurry crop. Keep the nominal
             # matched-budget ratio there; use calibrated fixed retention for
@@ -234,12 +247,6 @@ class Engine:
             )
         else:
             retention = auto_r
-        fv_kw = dict(config.FLASHVID_KW)
-        fv_kw["retention_ratio"] = retention
-        valid = {f.name for f in dataclasses.fields(FlashVidConfig)}
-        fv_cfg = FlashVidConfig(**{k: v for k, v in fv_kw.items() if k in valid})
-        fv_cfg.H, fv_cfg.W = h // 2, w // 2
-
         video_features = hidden.view(t, tpf, -1)
         # Small scalar/shape diagnostics only.  Keeping these in metadata makes
         # the compression boundary inspectable without retaining duplicate
@@ -261,14 +268,37 @@ class Engine:
             },
         }
         t0 = time.time()
-        compressed, keep_idx = flashvid_compression(
-            video_features=video_features,
-            cls_attention=cls_attention,
-            flashvid_config=fv_cfg,
-        )
+        sel_stats = None
+        if config.COMPRESSOR == "semvid":
+            # Query-aware selection on the SAME ViT output tensors. Saliency proxy
+            # is the feature norm (upstream line 883) — cls_attention stays unused.
+            q = (semvid_lib.embed_query(
+                    self.tokenizer, self.model.get_input_embeddings(), query_text,
+                    self.device, config.SEMVID_QUERY_TOKEN_MAX)
+                 if query_text else None)
+            s_cfg = semvid_lib.SemVidConfig(retention_ratio=retention, **config.SEMVID_KW)
+            keep_idx, sel_stats = semvid_lib.semvid_select(
+                video_features,
+                hidden.float().norm(dim=-1).view(t, tpf),
+                q,
+                s_cfg,
+            )
+            keep_idx = keep_idx.to(self.device).long().reshape(-1)
+            compressed = hidden[keep_idx]
+        else:
+            fv_kw = dict(config.FLASHVID_KW)
+            fv_kw["retention_ratio"] = retention
+            valid = {f.name for f in dataclasses.fields(FlashVidConfig)}
+            fv_cfg = FlashVidConfig(**{k: v for k, v in fv_kw.items() if k in valid})
+            fv_cfg.H, fv_cfg.W = h // 2, w // 2
+            compressed, keep_idx = flashvid_compression(
+                video_features=video_features,
+                cls_attention=cls_attention,
+                flashvid_config=fv_cfg,
+            )
+            compressed = compressed.reshape(-1, hidden.shape[-1])
+            keep_idx = keep_idx.to(self.device).long().reshape(-1)
         t_fv = time.time() - t0
-        compressed = compressed.reshape(-1, hidden.shape[-1])
-        keep_idx = keep_idx.to(self.device).long().reshape(-1)
         deepstack_kept = [d[keep_idx] for d in deepstack]  # anchors' rows (FlashVID line 324)
 
         # Native Qwen3-VL video layout (processing_qwen3_vl.py:218-227): per
@@ -299,8 +329,11 @@ class Engine:
             t_vit=round(t_vit, 2),
             t_flashvid=round(t_fv, 2),
             target_tokens=int(target_tokens),
+            compressor=config.COMPRESSOR,
             diagnostics=diagnostics,
         )
+        if sel_stats is not None:
+            m["semvid"] = sel_stats
         return Clip(
             kind="video",
             segment_ids=torch.tensor(seg, dtype=torch.long, device=self.device),

@@ -320,7 +320,8 @@ def run_sample(engine: Engine, row: dict, tool_names: tuple = (),
         else:  # compress_video
             vt, times = tools.compress_tensor(row["video_path"], s, e)
             clip = engine.encode_video_compressed(
-                vt, target_tokens, times, meta={"role": "compress", "span": (s, e)}
+                vt, target_tokens, times, meta={"role": "compress", "span": (s, e)},
+                query_text=data.format_question(row),  # semvid only; flashvid ignores
             )
             note = (f"compress_video: compressed overview of {s:.0f}s-{e:.0f}s "
                     f"({vt.shape[0]} frames -> {clip.meta['kept_tokens']} tokens).")

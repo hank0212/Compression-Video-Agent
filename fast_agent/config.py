@@ -85,6 +85,26 @@ FLASHVID_KW = dict(
     expansion=1.0,               # keep budget math exact (walkthrough default 1.25)
 )
 
+# ---- compressor selection ----
+# "flashvid" (default, query-agnostic CLS-saliency merge) | "semvid" (query-aware
+# selection — Keeping the Evidence Chain, arXiv:2603.05663; lifted in semvid.py).
+# Both consume the same ViT-output tensors and emit keep-indices into the full
+# pad run, so the Clip/assemble path is identical across compressors.
+COMPRESSOR = os.environ.get("FA_COMPRESSOR", "flashvid")
+SEMVID_KW = dict(
+    dyseg_c=0,
+    dyseg_tau=0.0,               # released presets: threshold cuts effectively off
+    stage1_topk_segments=0,      # soft allocation over all segments
+    stage1_smooth_win=1,
+    frame_weight_alpha=0.7,
+    obj_ratio=0.4,               # VideoQA regime (their videoqa preset direction,
+    mmr_lambda=0.3,              #  not the Charades grounding preset)
+    min_tokens_per_frame=1,
+    motion_query_beta=0.5,
+)
+SEMVID_QUERY_TOKEN_MAX = 64      # per-token query path if <= this many tokens,
+                                 # else mean-pooled vector (upstream default 50)
+
 # ---- oracle arm (LVBench only; forced coarse->fine from GT time_reference) ----
 # Compress step covers an evidence-WIDENED window (evidence span +/- margin), clamped
 # to the video; crop step targets the GT evidence span, widened to a min floor so a
