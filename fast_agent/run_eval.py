@@ -46,6 +46,69 @@ ARM_TOOLS = {
 }
 
 
+# Manifest fields that change model behavior. Two runs may share results ONLY if all of
+# these match -- otherwise a "full run" would silently mix samples generated under
+# different prompts/compressors/budgets, which is exactly the kind of quiet corruption
+# that invalidates a paired comparison.
+REUSE_KEYS = ("dataset", "arm", "tools", "compressor", "skim_timestamps",
+              "unify_time_format", "fixed_retention", "model_snapshot",
+              "initial_frames", "max_rounds", "max_new_tokens")
+
+
+def _read_jsonl(path: str) -> list:
+    out = []
+    if not os.path.exists(path):
+        return out
+    with open(path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
+def gather_reusable(dataset: str, arm: str, manifest: dict, self_dir: str,
+                    tags: list | None = None) -> dict:
+    """Collect already-computed results for this (dataset, arm) from OTHER run dirs whose
+    manifest is behaviourally identical. Returns {question_id: row}. Lets a later, larger
+    run skip everything a pilot already answered instead of recomputing it."""
+    found, sources = {}, []
+    for d in sorted(glob.glob(os.path.join(config.RUN_ROOT, f"{dataset}_{arm}_*"))):
+        if os.path.abspath(d) == os.path.abspath(self_dir):
+            continue
+        tag = os.path.basename(d)[len(f"{dataset}_{arm}_"):]
+        if tags and tag not in tags:
+            continue
+        other = {}
+        mp = os.path.join(d, "run_manifest.json")
+        if os.path.exists(mp):
+            try:
+                other = json.load(open(mp))
+            except json.JSONDecodeError:
+                pass
+        mismatch = [k for k in REUSE_KEYS if other.get(k) != manifest.get(k)]
+        if mismatch:
+            print(f"[reuse] skip {os.path.basename(d)} (differs on: {', '.join(mismatch)})")
+            continue
+        rows = [r for r in _read_jsonl(os.path.join(d, "results.jsonl"))
+                if r.get("question_id") is not None and not r.get("error")]
+        new = 0
+        for r in rows:
+            qid = str(r["question_id"])
+            if qid not in found:
+                r = dict(r); r["reused_from"] = os.path.basename(d)
+                found[qid] = r
+                new += 1
+        if new:
+            sources.append(f"{os.path.basename(d)}(+{new})")
+    if sources:
+        print(f"[reuse] importing {len(found)} results from: {', '.join(sources)}")
+    return found
+
+
 def write_summary(run_dir: str, arm: str):
     by_task, total = defaultdict(lambda: [0, 0]), [0, 0]
     tool_hist = defaultdict(int)
@@ -98,6 +161,11 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--verbose", action="store_true",
                     help="print the model's raw generation each round")
+    ap.add_argument("--reuse", nargs="?", const="auto", default=None,
+                    metavar="TAGS",
+                    help="skip questions already answered by other runs of the same "
+                         "dataset+arm whose config matches: bare --reuse takes any "
+                         "compatible run; --reuse tagA,tagB restricts to those tags")
     args = ap.parse_args()
 
     run_dir = os.path.join(config.RUN_ROOT, f"{args.dataset}_{args.arm}_{args.tag}")
@@ -149,6 +217,29 @@ def main():
                     done.add(json.loads(l)["question_id"])
                 except (json.JSONDecodeError, KeyError):
                     continue
+
+    # Cross-run reuse: import results this (dataset, arm) already produced under another
+    # tag, provided the manifest matches on every behaviour-affecting key. Scaling --num
+    # is safe because the seeded draw is a PREFIX (n=60 is the first 60 of n=200), so a
+    # later full run recomputes only the genuinely new questions.
+    if args.reuse:
+        manifest = json.load(open(manifest_path))
+        tags = None if args.reuse == "auto" else [t.strip() for t in args.reuse.split(",")]
+        pool = gather_reusable(args.dataset, args.arm, manifest, run_dir, tags)
+        imported = 0
+        if pool:
+            with open(results_path, "a") as rf:
+                for r in rows:
+                    qid = str(r["question_id"])
+                    if qid in done or qid not in pool:
+                        continue
+                    rf.write(json.dumps(pool[qid]) + "\n")
+                    done.add(qid)
+                    imported += 1
+            if imported:
+                write_summary(run_dir, args.arm)
+        print(f"[reuse] adopted {imported} previously-computed results into {os.path.basename(run_dir)}")
+
     rows = [r for r in rows if str(r["question_id"]) not in done]
     print(f"[eval] arm={args.arm} shard={args.shard}/{args.num_shards} "
           f"todo={len(rows)} (skipped {len(done)}) -> {run_dir}")
