@@ -243,7 +243,7 @@ def run_sample(engine: Engine, row: dict, tool_names: tuple = (),
 
     t_sample = time.time()
     dur = data.video_duration(row["video_path"])
-    pils = tools.initial_frames(row["video_path"])
+    pils, skim_times = tools.initial_frames_with_timestamps(row["video_path"])
     clip0 = engine.encode_images(pils, meta={"role": "initial"})
     initial_montage = (tj.save_montage(pils, os.path.join(media, "initial.png"))
                        if media else None)
@@ -253,7 +253,7 @@ def run_sample(engine: Engine, row: dict, tool_names: tuple = (),
 
     prompt = (
         data.format_question(row)
-        + "\n\n" + config.initial_view_text(dur, len(pils))
+        + "\n\n" + config.initial_view_text(dur, len(pils), skim_times)
         + (config.tool_instructions(dur, tool_names) if tool_names else "")
         + "\n\n" + config.ANSWER_INSTR
     )

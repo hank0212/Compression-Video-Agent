@@ -45,9 +45,36 @@ def video_duration(path: str) -> float:
         cap.release()
 
 
+# LVBench phrases times as M:SS/H:MM:SS inside the question ("What happens from
+# 17:16-17:40?") while the tools take SECONDS. Zero-shot Qwen read "17:16" as ~17
+# seconds and called crop_video(17,17) six times (qid 2367, 2026-07-25). Annotating
+# each clock time with its second-value unifies the two formats without removing any
+# information. NOTE for analysis: questions that embed their own timestamp are
+# localization-TRIVIAL by construction -- score them separately.
+_CLOCK_RE = re.compile(r"\b(\d{1,2}):([0-5]\d)(?::([0-5]\d))?\b")
+
+
+def _clock_to_seconds(m: re.Match) -> float:
+    a, b, c = m.group(1), m.group(2), m.group(3)
+    return (int(a) * 3600 + int(b) * 60 + int(c)) if c else (int(a) * 60 + int(b))
+
+
+def annotate_clock_times(text: str) -> str:
+    """Append '(= N s)' after each M:SS / H:MM:SS so clock text and tool seconds agree."""
+    def sub(m):
+        return f"{m.group(0)} (= {_clock_to_seconds(m):.0f} s)"
+    return _CLOCK_RE.sub(sub, text)
+
+
+UNIFY_TIME_FORMAT = os.environ.get("FA_UNIFY_TIME_FORMAT", "1") == "1"
+
+
 def format_question(row: dict) -> str:
     opts = "\n".join(row["options"])
-    return f"{row['question']}\n{opts}"
+    q = row["question"]
+    if UNIFY_TIME_FORMAT:
+        q = annotate_clock_times(q)
+    return f"{q}\n{opts}"
 
 
 _ANS_RE = re.compile(r"<answer>\s*\(?([A-D])\)?", re.IGNORECASE)

@@ -85,6 +85,8 @@ def main():
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--tag", default=time.strftime("%m%d"))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--verbose", action="store_true",
+                    help="print the model's raw generation each round")
     args = ap.parse_args()
 
     run_dir = os.path.join(config.RUN_ROOT, f"{args.dataset}_{args.arm}_{args.tag}")
@@ -141,10 +143,11 @@ def main():
             try:
                 if args.arm in ORACLE_ARMS:
                     r = oracle.run_oracle_sample(engine, row, record_dir=run_dir,
-                                                 mode=ORACLE_ARMS[args.arm])
+                                                 mode=ORACLE_ARMS[args.arm],
+                                                 verbose=args.verbose)
                 else:
                     r = run_sample(engine, row, tool_names=ARM_TOOLS[args.arm],
-                                   record_dir=run_dir)
+                                   record_dir=run_dir, verbose=args.verbose)
             except Exception as e:  # per-sample isolation
                 import traceback
                 traceback.print_exc()

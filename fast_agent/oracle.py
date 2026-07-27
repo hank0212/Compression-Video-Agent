@@ -72,7 +72,7 @@ def run_oracle_sample(engine, row: dict, record_dir: str | None = None,
         raise ValueError(f"oracle arm needs evidence; qid {qid} has none "
                          f"(time_reference={row.get('time_reference')!r})")
 
-    pils = tools.initial_frames(row["video_path"])
+    pils, skim_times = tools.initial_frames_with_timestamps(row["video_path"])
     clip0 = engine.encode_images(pils, meta={"role": "initial"})
     initial_montage = (tj.save_montage(pils, os.path.join(media, "initial.png"))
                        if media else None)
@@ -80,7 +80,7 @@ def run_oracle_sample(engine, row: dict, record_dir: str | None = None,
     schemas = [config.TOOL_SCHEMAS[t] for t in ORACLE_TOOLS]
     prompt = (
         data.format_question(row)
-        + "\n\n" + config.initial_view_text(dur, len(pils))
+        + "\n\n" + config.initial_view_text(dur, len(pils), skim_times)
         + config.tool_instructions(dur, ORACLE_TOOLS)
         + "\n\n" + config.ANSWER_INSTR
     )

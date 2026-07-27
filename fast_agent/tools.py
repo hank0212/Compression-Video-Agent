@@ -7,6 +7,7 @@ per-tool, uniform frame centers. Frames are smart-resized (Qwen formula: dims
 multiple of 32, area <= MAX_PIXELS) so the processor's own resize is a no-op.
 """
 
+import re
 import math
 import os
 import subprocess
@@ -232,12 +233,34 @@ def compress_tensor(video_path: str, start: float, end: float):
     )
 
 
+_TIME_STR_RE = re.compile(r"^\s*(\d+):([0-5]?\d)(?::([0-5]?\d))?\s*$")
+
+
+def parse_time_arg(v) -> float | None:
+    """Accept whatever format the model emits for a time argument and return seconds.
+    Handles: 1036, 1036.5, "1036", "1036s", "17:16" (m:ss), "1:06:37" (h:mm:ss).
+    Zero-shot models mix clock and second notation (a model read "17:16" as 17s and
+    called crop_video(17,17); 2026-07-25) -- parsing beats erroring."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    if not isinstance(v, str):
+        return None
+    s = v.strip().lower().removesuffix("sec").removesuffix("s").strip()
+    m = _TIME_STR_RE.match(v.strip())
+    if m:
+        a, b, c = m.group(1), m.group(2), m.group(3)
+        return float(int(a) * 3600 + int(b) * 60 + int(c)) if c else float(int(a) * 60 + int(b))
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
 def clamp_span(start, end, duration: float) -> tuple[float, float, str | None]:
     """Sanitize a model-emitted span. Returns (start, end, error_or_None)."""
-    try:
-        start, end = float(start), float(end)
-    except (TypeError, ValueError):
-        return 0.0, 0.0, "start_time/end_time must be numbers (seconds)."
+    start, end = parse_time_arg(start), parse_time_arg(end)
+    if start is None or end is None:
+        return 0.0, 0.0, "start_time/end_time must be numbers of SECONDS (e.g. 1036)."
     start = max(0.0, min(start, duration))
     end = max(0.0, min(end, duration))
     if end - start < 1.0:

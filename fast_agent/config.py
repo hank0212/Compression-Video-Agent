@@ -178,11 +178,36 @@ TOOL_SCHEMAS = {
     },
 }
 
-def initial_view_text(duration: float, n_frames: int) -> str:
-    return (
-        f"This video is {duration:.0f} seconds long. The {n_frames} frames above are "
-        f"uniformly sampled from 0s to {duration:.0f}s."
+def hms(seconds: float) -> str:
+    """Seconds -> H:MM:SS / M:SS, for stating both units wherever a time appears."""
+    s = int(round(max(seconds, 0)))
+    h, m, sec = s // 3600, (s % 3600) // 60, s % 60
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+# The initial skim is IMAGE modality, which (unlike video modality) carries NO native
+# `<t seconds>` marker per frame -- so without this legend the model must infer time
+# from frame INDEX with no anchor, and cannot aim a crop. Measured 2026-07-25: the
+# autonomous arm's GT-evidence coverage was 0.00 on 6/6 questions.
+SKIM_TIMESTAMPS = os.environ.get("FA_SKIM_TIMESTAMPS", "1") == "1"
+
+
+def initial_view_text(duration: float, n_frames: int, frame_times: list | None = None) -> str:
+    base = (
+        f"This video is {duration:.0f} seconds long ({hms(duration)}). The {n_frames} "
+        f"frames above are uniformly sampled from 0s to {duration:.0f}s."
     )
+    if not SKIM_TIMESTAMPS:
+        return base
+    step = duration / max(n_frames, 1)
+    line = [base,
+            f"They are in chronological order; frame i (1-indexed) is at about "
+            f"(i-1)x{step:.1f} seconds."]
+    if frame_times:
+        times = ", ".join(f"{t:.0f}" for t in frame_times)
+        line.append(f"Exact frame times in seconds, in order: {times}.")
+    line.append("ALL TIMES YOU PASS TO TOOLS MUST BE IN SECONDS (not m:ss).")
+    return " ".join(line)
 
 def tool_instructions(duration: float, tools: tuple) -> str:
     """Short strategic hint in the user turn. Tool signatures + call format come from
