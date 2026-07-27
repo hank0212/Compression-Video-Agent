@@ -96,8 +96,16 @@ def run_oracle_sample(engine, row: dict, record_dir: str | None = None,
     dur = data.video_duration(row["video_path"])
     spans = oracle_spans(row, dur, mode)
     if spans is None:
-        raise ValueError(f"oracle arm needs evidence; qid {qid} has none "
-                         f"(time_reference={row.get('time_reference')!r})")
+        if not row.get("evidence"):
+            raise ValueError(f"oracle arm needs evidence; qid {qid} has none "
+                             f"(time_reference={row.get('time_reference')!r})")
+        # Evidence spans (nearly) the whole video -> no room for a same-width control
+        # outside it. Localization is not a meaningful variable for these questions,
+        # so they must be EXCLUDED from the localization comparison for every arm,
+        # not silently scored.
+        raise ValueError(
+            f"no wrong-location control possible for qid {qid}: evidence "
+            f"{row.get('time_reference')!r} spans ~the whole {dur:.0f}s video")
     tool_names = MODE_TOOLS[mode]
 
     pils, skim_times = tools.initial_frames_with_timestamps(row["video_path"])
@@ -208,9 +216,19 @@ def run_oracle_sample(engine, row: dict, record_dir: str | None = None,
         forced_step("crop_video", *region)
 
     # Forced answer: one real generation over skim + the forced evidence.
-    messages.append({"role": "user", "parts": [
-        "Based on the video evidence above, give your final answer as "
-        "<answer>X</answer> where X is one of A, B, C, or D."]})
+    # NOTE: the terse form below asks straight for the letter, and 67% of oracle failures
+    # came back as a bare <answer>X</answer> with no reasoning -- which may be SUPPRESSING
+    # chain-of-thought relative to the autonomous arms (they get ANSWER_INSTR's "Think
+    # first inside <think></think>"). FA_ORACLE_COT=1 restores an explicit reasoning
+    # invitation so the effect can be measured rather than assumed.
+    if os.environ.get("FA_ORACLE_COT") == "1":
+        final_instr = ("Based on the video evidence above, reason step by step inside "
+                       "<think></think> tags about what the frames show, then give your "
+                       "final answer as <answer>X</answer> where X is one of A, B, C, or D.")
+    else:
+        final_instr = ("Based on the video evidence above, give your final answer as "
+                       "<answer>X</answer> where X is one of A, B, C, or D.")
+    messages.append({"role": "user", "parts": [final_instr]})
     _text, rec = gen("answer")
     rec["action"] = {"kind": "answer"}
     rounds.append(rec)
