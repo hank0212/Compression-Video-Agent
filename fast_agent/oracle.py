@@ -30,17 +30,27 @@ from . import trajectory as tj
 from .agent_loop import assemble, decode
 from .model import clip_tokens
 
-# Both tools are shown in the # Tools block for every oracle mode (so the model-facing
-# context matches the autonomous arm; only the forced evidence differs).
-ORACLE_TOOLS = ("compress_video", "crop_video")
-ORACLE_MODES = ("crop", "compress", "both")
+# Tools shown in the # Tools block, PER MODE. This must mirror run_eval.ARM_TOOLS for the
+# autonomous arm each mode is compared against: showing crop-only modes an extra
+# compress_video schema (and the "use compress_video to skim, then crop to zoom" strategy
+# hint from config.tool_instructions) gives oracle_crop a different prompt than the
+# autonomous `crop` arm, confounding the single comparison the experiment exists to make.
+MODE_TOOLS = {
+    "crop": ("crop_video",),
+    "compress": ("compress_video",),
+    "both": ("compress_video", "crop_video"),
+    "ctrl": ("crop_video",),          # wrong-location control: same tools as oracle_crop
+}
+ORACLE_MODES = tuple(MODE_TOOLS)
 
 
-def oracle_spans(row: dict, duration: float) -> dict | None:
-    """Derive the forced GT evidence REGION (used by BOTH crop and compress, so the two
-    forms are compared at a matched region). The raw `time_reference` span is widened to
-    a min floor so tight/zero-width refs still yield enough frames. None if no usable
-    evidence (malformed time_reference)."""
+def oracle_spans(row: dict, duration: float, mode: str = "crop") -> dict | None:
+    """Derive the forced REGION. For the evidence modes this is the GT evidence span
+    (widened to a min floor), used by BOTH crop and compress so the two forms are compared
+    at a matched region. For mode="ctrl" it is a SAME-WIDTH region deliberately placed
+    AWAY from the evidence -- the control that separates "the right pixels" from "more
+    pixels" (without it, oracle_crop vs baseline is equally explained by extra visual
+    tokens of any content). None if no usable evidence."""
     ev = row.get("evidence")
     if not ev:
         return None
@@ -51,7 +61,24 @@ def oracle_spans(row: dict, duration: float) -> dict | None:
     mid = 0.5 * (es + ee)
     xs = max(0.0, mid - cw / 2)
     xe = min(duration, mid + cw / 2)
-    return {"region": (xs, xe)}
+    if mode != "ctrl":
+        return {"region": (xs, xe)}
+
+    # Control: mirror the region about the video midpoint; if the mirror still overlaps
+    # the evidence (evidence near the centre), slide it to the farthest non-overlapping
+    # placement. Deterministic -- no seed, so the control is reproducible per question.
+    w = xe - xs
+    m_xs = max(0.0, min(duration - w, duration - xe))
+    m_xe = m_xs + w
+    if not (m_xe <= xs or m_xs >= xe):          # mirror overlaps evidence -> go to an edge
+        left_room, right_room = xs, duration - xe
+        if left_room >= right_room and left_room >= w:
+            m_xs, m_xe = 0.0, w
+        elif right_room >= w:
+            m_xs, m_xe = duration - w, duration
+        else:
+            return None                          # video too short to place a clean control
+    return {"region": (m_xs, m_xe), "evidence_region": (xs, xe)}
 
 
 def run_oracle_sample(engine, row: dict, record_dir: str | None = None,
@@ -67,21 +94,22 @@ def run_oracle_sample(engine, row: dict, record_dir: str | None = None,
 
     t_sample = time.time()
     dur = data.video_duration(row["video_path"])
-    spans = oracle_spans(row, dur)
+    spans = oracle_spans(row, dur, mode)
     if spans is None:
         raise ValueError(f"oracle arm needs evidence; qid {qid} has none "
                          f"(time_reference={row.get('time_reference')!r})")
+    tool_names = MODE_TOOLS[mode]
 
     pils, skim_times = tools.initial_frames_with_timestamps(row["video_path"])
     clip0 = engine.encode_images(pils, meta={"role": "initial"})
     initial_montage = (tj.save_montage(pils, os.path.join(media, "initial.png"))
                        if media else None)
 
-    schemas = [config.TOOL_SCHEMAS[t] for t in ORACLE_TOOLS]
+    schemas = [config.TOOL_SCHEMAS[t] for t in tool_names]
     prompt = (
         data.format_question(row)
         + "\n\n" + config.initial_view_text(dur, len(pils), skim_times)
-        + config.tool_instructions(dur, ORACLE_TOOLS)
+        + config.tool_instructions(dur, tool_names)
         + "\n\n" + config.ANSWER_INSTR
     )
     messages = [{"role": "user", "parts": [clip0, prompt]}]
@@ -170,11 +198,13 @@ def run_oracle_sample(engine, row: dict, record_dir: str | None = None,
                          "parts": ["<tool_response>\n", clip,
                                    f"\n{note}{config.TOOL_RESULT_INSTR}\n</tool_response>"]})
 
-    # Forced evidence at the GT region, per mode (both = coverage form then detail form).
+    # Forced evidence, per mode (both = coverage form then detail form; ctrl = a
+    # same-width crop AWAY from the evidence, so it is matched to oracle_crop on tool,
+    # frame count and token budget and differs ONLY in location).
     region = spans["region"]
     if mode in ("compress", "both"):
         forced_step("compress_video", *region)
-    if mode in ("crop", "both"):
+    if mode in ("crop", "both", "ctrl"):
         forced_step("crop_video", *region)
 
     # Forced answer: one real generation over skim + the forced evidence.
@@ -211,10 +241,16 @@ def run_oracle_sample(engine, row: dict, record_dir: str | None = None,
                 "tools": [c["name"] for c in calls],
                 "seconds": seconds, "schema_version": 3,
                 "oracle": {"mode": mode,
+                           "tools_shown": list(tool_names),
                            "evidence": row.get("evidence"),
                            "time_reference": row.get("time_reference"),
                            "region": list(region),
+                           "evidence_region": list(spans.get("evidence_region", region)),
+                           "region_width": round(region[1] - region[0], 1),
+                           "localization_trivial": row.get("localization_trivial"),
                            "compressor": config.COMPRESSOR,
+                           "skim_timestamps": config.SKIM_TIMESTAMPS,
+                           "unify_time_format": data.UNIFY_TIME_FORMAT,
                            "crop_min_width": config.ORACLE_CROP_MIN_WIDTH},
                 "timing": {"sample_seconds": seconds,
                            "round_seconds": round(sum(r["timing"]["round_seconds"] for r in rounds), 3),

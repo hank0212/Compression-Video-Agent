@@ -245,8 +245,8 @@ def parse_time_arg(v) -> float | None:
         return float(v)
     if not isinstance(v, str):
         return None
-    s = v.strip().lower().removesuffix("sec").removesuffix("s").strip()
-    m = _TIME_STR_RE.match(v.strip())
+    s = v.strip().lower().removesuffix("seconds").removesuffix("sec").removesuffix("s").strip()
+    m = _TIME_STR_RE.match(s)          # match the SUFFIX-STRIPPED form, so "17:16s" parses
     if m:
         a, b, c = m.group(1), m.group(2), m.group(3)
         return float(int(a) * 3600 + int(b) * 60 + int(c)) if c else float(int(a) * 60 + int(b))

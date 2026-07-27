@@ -28,7 +28,8 @@ from .model import Engine
 # Oracle arms (LVBench only): forced GT-region evidence, then answer. The arm name maps
 # to the forced-evidence mode; oracle_crop is the primary "is perception enough given
 # perfect localization" instrument, the other two isolate the compression form.
-ORACLE_ARMS = {"oracle_crop": "crop", "oracle_compress": "compress", "oracle_both": "both"}
+ORACLE_ARMS = {"oracle_crop": "crop", "oracle_compress": "compress",
+               "oracle_both": "both", "oracle_ctrl": "ctrl"}
 
 ARM_TOOLS = {
     "baseline": (),
@@ -37,6 +38,11 @@ ARM_TOOLS = {
     "oracle_crop": ("crop_video",),                 # forced GT-region crop (PRIMARY)
     "oracle_compress": ("compress_video",),         # forced GT-region compress
     "oracle_both": ("compress_video", "crop_video"),# forced GT-region compress + crop
+    # Wrong-location control: same tool, same width, same token budget as oracle_crop,
+    # but the crop is placed AWAY from the evidence. oracle_crop - oracle_ctrl isolates
+    # "the right pixels" from "more pixels" (uniform frame count alone moved VideoMME
+    # +13.3pp, so an uncontrolled oracle gain is not attributable to localization).
+    "oracle_ctrl": ("crop_video",),
 }
 
 
@@ -49,7 +55,12 @@ def write_summary(run_dir: str, arm: str):
             for line in f:
                 if not line.strip():
                     continue
-                r = json.loads(line)
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    # A partial trailing line (process killed mid-write on a multi-hour
+                    # run) must not kill aggregation -- and must not block resume.
+                    continue
                 ok = bool(r.get("correct"))
                 by_task[r["task_type"]][0] += ok
                 by_task[r["task_type"]][1] += 1
@@ -104,6 +115,11 @@ def main():
                        "shard": args.shard, "num_shards": args.num_shards,
                        "tools": list(ARM_TOOLS[args.arm]),
                        "compressor": config.COMPRESSOR,
+                       # prompt-shaping flags change model behavior -> must be recorded
+                       # or two runs with the same tag are not comparable
+                       "skim_timestamps": config.SKIM_TIMESTAMPS,
+                       "unify_time_format": data.UNIFY_TIME_FORMAT,
+                       "fixed_retention": config.FIXED_RETENTION,
                        "model_snapshot": config.MODEL_SNAPSHOT,
                        "initial_frames": config.INITIAL_FRAMES,
                        "max_rounds": config.MAX_ROUNDS,
@@ -126,7 +142,13 @@ def main():
     done = set()
     if os.path.exists(results_path):
         with open(results_path) as f:
-            done = {json.loads(l)["question_id"] for l in f if l.strip()}
+            for l in f:
+                if not l.strip():
+                    continue
+                try:                       # tolerate a truncated trailing line
+                    done.add(json.loads(l)["question_id"])
+                except (json.JSONDecodeError, KeyError):
+                    continue
     rows = [r for r in rows if str(r["question_id"]) not in done]
     print(f"[eval] arm={args.arm} shard={args.shard}/{args.num_shards} "
           f"todo={len(rows)} (skipped {len(done)}) -> {run_dir}")

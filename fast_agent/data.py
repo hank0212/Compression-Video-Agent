@@ -81,12 +81,24 @@ _ANS_RE = re.compile(r"<answer>\s*\(?([A-D])\)?", re.IGNORECASE)
 _FALLBACK_RE = re.compile(r"\b([A-D])\b")
 
 
+# A refusal that enumerates the options ("...I cannot pick one of A, B, C, or D.")
+# ends in a bare 'D', which the fallback scan would return as a confident answer --
+# deterministically scoring refusals as D. Strip enumerations before the fallback.
+_ENUM_RE = re.compile(r"\b[A-D]\s*(?:,\s*[A-D]\s*)+(?:,?\s*(?:or|and)\s*[A-D])?\b",
+                      re.IGNORECASE)
+_ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.IGNORECASE | re.DOTALL)
+
+
 def extract_answer(text: str) -> str | None:
     m = _ANS_RE.search(text)
     if m:
         return m.group(1).upper()
-    # fallback: last bare option letter in the final line(s)
-    tail = text.strip()[-200:]
+    # An explicit <answer> tag whose content is not an option letter (e.g. "Unknown",
+    # "None of the above") is a REFUSAL, not a parse failure -- never guess past it.
+    if _ANSWER_TAG_RE.search(text):
+        return None
+    # fallback: last bare option letter in the final line(s), ignoring enumerations
+    tail = _ENUM_RE.sub(" ", text.strip()[-200:])
     hits = _FALLBACK_RE.findall(tail)
     return hits[-1].upper() if hits else None
 
@@ -182,8 +194,14 @@ def load_lvbench(n: int | None = None, seed: int = 0) -> list[dict]:
                 "options": opts,
                 "answer": str(qa["answer"]).strip().upper(),
                 "task_type": qt[0] if qt else "unknown",
+                "task_types": list(qt),
                 "evidence": list(ev) if ev else None,
                 "time_reference": qa.get("time_reference"),
+                # 13.1% of LVBench questions state their own evidence timestamp
+                # ("What happens from 17:16-17:40?"). Those are localization-TRIVIAL:
+                # any arm can hit the right span without searching, which inflates the
+                # autonomous arm's recall. Flag so analysis can stratify or exclude.
+                "localization_trivial": bool(_CLOCK_RE.search(stem)),
             })
     rows.sort(key=lambda x: int(x["question_id"]))
     if n is not None:
