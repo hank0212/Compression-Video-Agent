@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from fast_agent import config, data, tools
-from fast_agent.model import clip_tokens, retention_for_budget
+from fast_agent.probe_budget import clip_tokens, retention_for_budget
 
 
 # --------------------------------------------------------------------------

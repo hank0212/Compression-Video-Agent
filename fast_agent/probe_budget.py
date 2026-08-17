@@ -35,6 +35,20 @@ MODEL = ("/local1/cfyang/models--Qwen--Qwen3-VL-8B-Instruct/snapshots/"
 PROXY_ROOT = "/local1/cfyang/hanklin/outputs/lvbench_agent"
 
 
+def clip_tokens(grid_thw, merge_size: int = 2, retention: float = 1.0) -> int:
+    """Exact merged-token count for a grid. Derive it, never hardcode: patch_size 16 and
+    merge_size 2 mean one output token covers 32x32 source pixels."""
+    total = 0
+    for t, h, w in grid_thw.tolist():
+        total += int(t) * (int(h) // merge_size) * (int(w) // merge_size)
+    return int(round(total * retention))
+
+
+def retention_for_budget(base_tokens: int, target_tokens: int, r_min: float = 0.02) -> float:
+    """The retention rate that takes `base_tokens` down to `target_tokens`, clamped."""
+    return max(r_min, min(1.0, target_tokens / max(base_tokens, 1)))
+
+
 def mm_kwargs(vidcap: int, keep_max_pixels: bool = False) -> dict:
     """What serve_arm.sh passes, minus the parts the VIDEO processor ignores.
 

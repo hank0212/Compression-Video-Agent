@@ -1,5 +1,8 @@
 # Does ViT-side compression help a video agent find evidence in long video?
 
+> Reading this to review it? Start with [ARCHITECTURE.md](ARCHITECTURE.md) — it explains
+> the design, the invariants that silently break, and where the author is least confident.
+
 Answer, on LVBench with Qwen3-VL-8B-Instruct: **no.** At a matched visual-token budget,
 two mechanically unrelated token-selection heuristics (VidCom2 and EVS) both land *below*
 simply downscaling every frame, at two different operating points. Meanwhile an oracle that
@@ -79,13 +82,9 @@ fast_agent/            the harness
   diagnose_runs.py     faithfulness checks across arms
   analyze_pairs.py     paired deltas, McNemar, bootstrap CI, stratified tables
   longvt_scoring.py    lmms-eval's answer extractor, vendored verbatim
-  agent_loop.py        turn-by-turn driver: message assembly, tool dispatch, finalizer
-  model.py             OpenAI-compatible client and multimodal message construction
-  trajectory.py        per-question trajectory records
-  preflight.py         pre-launch checks (server reachable, proxies present, budget)
-  semvid.py            query-aware selection, reachable from model.py; not exercised
-                       by any arm in the report
-  tests/               unit tests, and a GPU test that needs a live server
+  preflight.py         pre-launch checks: server flags match the intended arm, proxies
+                       present and on-timeline, plugin actually activated
+  tests/               unit tests
 
 vidcom2_vllm/          VidCom2 as an out-of-tree vLLM plugin
   retention.py         the retention mask (see notes below)
