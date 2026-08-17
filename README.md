@@ -79,6 +79,13 @@ fast_agent/            the harness
   diagnose_runs.py     faithfulness checks across arms
   analyze_pairs.py     paired deltas, McNemar, bootstrap CI, stratified tables
   longvt_scoring.py    lmms-eval's answer extractor, vendored verbatim
+  agent_loop.py        turn-by-turn driver: message assembly, tool dispatch, finalizer
+  model.py             OpenAI-compatible client and multimodal message construction
+  trajectory.py        per-question trajectory records
+  preflight.py         pre-launch checks (server reachable, proxies present, budget)
+  semvid.py            query-aware selection, reachable from model.py; not exercised
+                       by any arm in the report
+  tests/               unit tests, and a GPU test that needs a live server
 
 vidcom2_vllm/          VidCom2 as an out-of-tree vLLM plugin
   retention.py         the retention mask (see notes below)
@@ -89,6 +96,11 @@ results/
   all_runs.csv         every completed run: settings, n, duplicates, errors, accuracy
   manifests/           the run_manifest.json each run wrote at launch
 ```
+
+This tree is deliberately narrow: it holds what is needed to re-run the experiments in the
+report and audit their numbers, and nothing else. Exploratory notebooks, debug traces,
+per-case visualisations, judge servers, and design notes for compressors that never entered
+the results have all been dropped rather than shipped as clutter.
 
 ---
 
