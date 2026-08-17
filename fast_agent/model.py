@@ -181,9 +181,18 @@ class Engine:
         frame_times: list[float],
         meta: dict | None = None,
         query_text: str | None = None,
+        retention: float | None = None,
     ) -> Clip:
         """Encode a (T,C,H,W) uint8 clip as VIDEO modality and compress to
         ~target_tokens via config.COMPRESSOR. ViT runs exactly once either way.
+
+        `retention` pins the ratio exactly and skips the config/floor logic entirely.
+        Pass it instead of reassigning config.FIXED_RETENTION / FLOOR_ENGAGE_FRAMES:
+        those are module globals, so mutating them to set up one call leaves the value
+        behind for every later call if anything raises in between -- and run_eval
+        snapshots them into run_manifest.json at startup, so the manifest can end up
+        describing a retention the run never used. Omit it to keep the agent's
+        configured behaviour (matched-budget floor on short spans).
         - flashvid (default): patched ViT last-block CLS attention → DySeg +
           ADTS + TSTM merge (alpha=0.7). Query-agnostic; query_text ignored.
         - semvid: query-aware selection (semvid.py) on the same ViT output —
@@ -228,7 +237,9 @@ class Engine:
         t_vit = time.time() - t0
 
         auto_r = retention_for_budget(base_tokens, target_tokens)
-        if config.COMPRESSOR == "semvid":
+        if retention is not None:
+            retention = float(retention)     # caller pinned it; no floor, no config
+        elif config.COMPRESSOR == "semvid":
             # SemVID keeps EXACTLY round(base*ratio) tokens (integer allocation,
             # no segment-floor overshoot), so matched budget needs no calibrated
             # fixed retention — the FlashVID FIXED_RETENTION/2128-frame-cap pair
@@ -269,7 +280,22 @@ class Engine:
         }
         t0 = time.time()
         sel_stats = None
-        if config.COMPRESSOR == "semvid":
+        bypassed = retention >= 1.0
+        if bypassed:
+            # No compression requested -- and calling FlashVID with retention_ratio=1.0
+            # is NOT a no-op. It preserves the token COUNT (kept == base, which is why
+            # this went unnoticed) but still routes the non-ADTS share through TSTM
+            # temporal averaging: at the stock alpha=0.7 the per-frame budget splits
+            # 32 exact selections + 13 merge anchors, so ~29% of the "uncompressed"
+            # tokens come back as cross-frame blends carrying the index of a DIFFERENT
+            # frame than their content. Every arm this project labelled "uncompressed"
+            # (lossless_singleshot's full640/unif_matched, the archive's lossless_ab
+            # pred_full, and agent compress calls on spans short enough that
+            # retention_for_budget saturates at 1.0) was really 29% blended.
+            # Bypass entirely: exact identity, and cheaper (no DPC-kNN).
+            compressed = hidden
+            keep_idx = torch.arange(base_tokens, device=hidden.device, dtype=torch.long)
+        elif config.COMPRESSOR == "semvid":
             # Query-aware selection on the SAME ViT output tensors. Saliency proxy
             # is the feature norm (upstream line 883) — cls_attention stays unused.
             q = (semvid_lib.embed_query(
@@ -330,6 +356,7 @@ class Engine:
             t_flashvid=round(t_fv, 2),
             target_tokens=int(target_tokens),
             compressor=config.COMPRESSOR,
+            bypassed=bool(bypassed),   # True => exact identity, no compressor ran
             diagnostics=diagnostics,
         )
         if sel_stats is not None:

@@ -90,16 +90,25 @@ _ANSWER_TAG_RE = re.compile(r"<answer>(.*?)</answer>", re.IGNORECASE | re.DOTALL
 
 
 def extract_answer(text: str) -> str | None:
-    m = _ANS_RE.search(text)
-    if m:
-        return m.group(1).upper()
+    """Final option letter, or None for a refusal / no answer.
+
+    Callers pass the CONCATENATION of every round's text, so two details matter:
+      - the LAST <answer> tag wins, not the first: the finalizer turn appends its
+        answer after the earlier rounds, and the model's final word is the answer.
+      - enumerations are stripped from the WHOLE text before the tail window is
+        taken. Stripping after windowing lets a 200-char cut land inside
+        "...between A, B, C, or D", leaving a bare "D" that the fallback scores as
+        a confident answer -- i.e. booking a refusal as a wrong letter.
+    """
+    hits = _ANS_RE.findall(text)
+    if hits:
+        return hits[-1].upper()
     # An explicit <answer> tag whose content is not an option letter (e.g. "Unknown",
     # "None of the above") is a REFUSAL, not a parse failure -- never guess past it.
     if _ANSWER_TAG_RE.search(text):
         return None
     # fallback: last bare option letter in the final line(s), ignoring enumerations
-    tail = _ENUM_RE.sub(" ", text.strip()[-200:])
-    hits = _FALLBACK_RE.findall(tail)
+    hits = _FALLBACK_RE.findall(_ENUM_RE.sub(" ", text.strip())[-200:])
     return hits[-1].upper() if hits else None
 
 

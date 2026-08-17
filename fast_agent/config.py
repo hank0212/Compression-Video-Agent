@@ -178,6 +178,124 @@ TOOL_SCHEMAS = {
     },
 }
 
+# ---- LongVT-faithful prompt (LongVT/examples/eval/single_inference.py) ----
+# Verbatim from the reference eval, including the `video_path` parameter that our
+# loop does not need: the schema text is part of the prompt the model conditions on,
+# so trimming it would no longer be "LongVT style". The runner ignores whatever path
+# the model echoes back and uses the row's own path.
+LONGVT_TOOL_SCHEMAS = {
+    "crop_video": {
+        "type": "function",
+        "function": {
+            "name": "crop_video",
+            "description": ("Crop a video to a specified duration. Use this tool to zoom "
+                            "in on specific time segments for detailed analysis."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "video_path": {"type": "string", "description": "Path to the video file"},
+                    "start_time": {"type": "number", "description": "Start time in seconds"},
+                    "end_time": {"type": "number", "description": "End time in seconds"},
+                },
+                "required": ["video_path", "start_time", "end_time"],
+            },
+        },
+    },
+}
+
+# LongVT's own NO-TOOL mode (single_inference.py, `--no_tool`). A no-tool run must not be
+# handed the tool prompt: measured 2026-08-13, run1 was sent "call **crop_video** if needed"
+# and a video path with no tool available, which is not a vanilla baseline at all.
+LONGVT_SYSTEM_PROMPT = (
+    "You are a helpful assistant. When the user asks a question, your response must include "
+    "two parts: first, the reasoning process enclosed in <think>...</think> tags, then the "
+    "final answer enclosed in <answer>...</answer> tags. Please provide a clear, concise "
+    "response within <answer></answer> tags that directly addresses the question."
+)
+
+LONGVT_TOOL_PROMPT = (
+    "Think first, call **crop_video** if needed, then answer. "
+    "Format strictly as: <think>...</think> <tool_call>...</tool_call> (if needed) "
+    "<answer>...</answer>."
+)
+
+
+# ---- "informed" prompt: environment FACTS, never a search strategy -------------
+# WHY THIS EXISTS (measured 2026-08-13 on run2/run4, n=1,548 each)
+#   median crop width          10 s     against a 128 s tool capacity
+#   video duration median   3,666 s  ->  one crop sees 0.27% of the timeline
+#   ~2.2 calls/question      ->        ~0.6% of the video ever inspected
+#   98% of multi-call turns are a monotonic scan PLAN emitted in one turn
+#     e.g. (0,10) (10,20) (20,30) ... until the 1024-token cap cuts it mid-word
+#   genuine-search hit rate    2.8% (run2) / 2.2% (run4)
+# The tool-call SYNTAX is fine (95% / 91% of blocks parse), and the calls are not
+# repeats (0 of 350 turns had identical arguments). The model simply does not know
+# (a) that the protocol is turn-based, or (b) what the tool can return.
+#
+# LongVT's prompt can omit all of this because LongVT-RFT was TRAINED on the
+# interaction pattern. Zero-shot Qwen3-VL was not, and at a 2% hit rate there is no
+# localization signal left for compression to improve or degrade -- which makes the
+# whole run2-vs-run4 comparison unreadable.
+#
+# THE LINE THIS MUST NOT CROSS: state facts about the environment, never a policy.
+# "crop_video returns up to 128 frames" is a fact. "Start with a wide crop, then
+# narrow down" is the search behaviour we are trying to MEASURE -- writing it into
+# the prompt would manufacture the result and void the ablation.
+INFORMED_TOOL_SCHEMAS = {
+    "crop_video": {
+        "type": "function",
+        "function": {
+            "name": "crop_video",
+            # Accurate description of what tools.crop_frames actually does, including
+            # the long-span behaviour the LongVT schema never mentions -- the model
+            # cannot ask for a coarse wide view if it does not know one is available.
+            "description": (
+                f"Return frames from a time span of this video. Frames are sampled at 1 "
+                f"frame per second between start_time and end_time, up to "
+                f"{CROP_MAX_FRAMES} frames. If the span is longer than {CROP_MAX_FRAMES} "
+                f"seconds, {CROP_MAX_FRAMES} frames are sampled uniformly across the "
+                f"whole span instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_time": {"type": "number", "description": "Start time in seconds."},
+                    "end_time": {"type": "number", "description": "End time in seconds, must be greater than start_time."},
+                },
+                # video_path dropped on purpose: the loop owns the video and ignores
+                # whatever path the model echoes, so requiring it only invites a
+                # hallucinated string in every call.
+                "required": ["start_time", "end_time"],
+            },
+        },
+    },
+}
+
+
+def informed_user_text(question: str, duration: float, max_rounds: int) -> str:
+    """LongVT's format contract + the environment facts, and nothing else.
+
+    The `<think>/<tool_call>/<answer>` sentence is kept verbatim from LongVT because it
+    is the SCORING contract (data.extract_answer reads the tag), not a strategy hint.
+    """
+    return (
+        f"{question}\n\n"
+        f"This video is {duration:.0f} seconds long ({hms(duration)}).\n"
+        f"crop_video returns frames from a time span you choose, sampled at 1 frame per "
+        f"second, up to {CROP_MAX_FRAMES} frames; a span longer than {CROP_MAX_FRAMES} "
+        f"seconds is sampled down to {CROP_MAX_FRAMES} frames spread across it.\n"
+        f"You may call crop_video at most {max_rounds} times. Make one call per turn — "
+        f"the frames are returned to you before you choose what to do next.\n\n"
+        f"Think first, then answer. Format strictly as: <think>...</think> "
+        f"<tool_call>...</tool_call> (if needed) <answer>...</answer>."
+    )
+
+
+def longvt_user_text(question: str, video_path: str) -> str:
+    """`{question} {TOOL_PROMPT} The Video path for this video is: {video_path}`"""
+    return f"{question} {LONGVT_TOOL_PROMPT} The Video path for this video is: {video_path}"
+
+
 def hms(seconds: float) -> str:
     """Seconds -> H:MM:SS / M:SS, for stating both units wherever a time appears."""
     s = int(round(max(seconds, 0)))

@@ -137,8 +137,17 @@ def assemble(engine: Engine, messages: list, tools: list | None = None) -> Assem
     off = 0
     for c in vid_clips:
         pos = vid_pos[off : off + c.meta["base_tokens"]]
+        assert pos.shape[0] == c.meta["base_tokens"], (
+            f"video clip claims {c.meta['base_tokens']} base tokens but only "
+            f"{pos.shape[0]} <|video_pad|> positions remain")
         off += c.meta["base_tokens"]
         kept = pos[c.keep_indices]              # duplicates preserved
+        # Official FlashVID asserts exactly this before its scatter
+        # (modeling_qwen3_vl.py:338). Without it a keep_indices/embeds mismatch
+        # silently desyncs the deepstack rows from the visual positions, which
+        # corrupts results rather than raising.
+        assert kept.shape[0] == c.n_tokens, (
+            f"kept positions {kept.shape[0]} != compressed tokens {c.n_tokens}")
         embeds[0, kept] = c.embeds.to(embeds.dtype)
         visual_mask[kept] = True
         kept_video.append(kept)
@@ -158,6 +167,13 @@ def assemble(engine: Engine, messages: list, tools: list | None = None) -> Assem
             torch.cat([c.deepstack[lv] for c in clips]).to(embeds.dtype)
             for lv in range(n_levels)
         ]
+        # The LM indexes deepstack rows by position among the True entries of
+        # visual_final, so the row count must equal that many -- and the clip order
+        # must match ascending position order (it does: clips are appended in message
+        # order). A mismatch here is the failure mode the assert above guards per-clip.
+        assert deepstack[0].shape[0] == int(visual_final.sum()), (
+            f"deepstack rows {deepstack[0].shape[0]} != visual positions "
+            f"{int(visual_final.sum())}")
     next_pos = int(position_ids.max()) + 1
     return Assembled(embeds, position_ids, visual_final, deepstack, next_pos,
                      full_ids[:, final_index])
@@ -189,8 +205,10 @@ def decode(engine: Engine, a: Assembled,
         if next_id in engine.eos_ids:
             break
         gen.append(next_id)
-        text = engine.tokenizer.decode(gen)
-        if any(text.endswith(t) for t in STOP_STRINGS):
+        # Only the tail can end with a stop string, so decode the tail -- decoding the
+        # whole `gen` list every step is O(n^2) over a 2048-token budget. 16 tokens is
+        # far more than the longest stop string ("</tool_call>") needs.
+        if any(engine.tokenizer.decode(gen[-16:]).endswith(t) for t in STOP_STRINGS):
             break
         e = embed_tokens(torch.tensor([[next_id]], device=engine.device))
         pos = torch.full((3, 1, 1), next_pos + s, device=engine.device, dtype=torch.long)

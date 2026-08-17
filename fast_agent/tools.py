@@ -61,21 +61,29 @@ def _plan(video_path: str, start, end, max_frames: int, even: bool):
     return centers, fps_v, n_v, th, tw
 
 
+# Both decoders return (frames, times) and SKIP a planned sample when the read
+# fails. They must therefore report the timestamps of the frames they actually
+# produced: returning centers[:len(frames)] instead would relabel every frame after
+# a gap with an earlier frame's time, and those timestamps are what the model reads
+# (`<t seconds>` markers) and aims its crop spans at. Silent, and wrong by however
+# long the gap is.
+
 def _decode_cv2(video_path, centers, fps_v, n_v, th, tw):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"cannot open {video_path}")
     try:
         idxs = np.clip((centers * fps_v).astype(int), 0, max(n_v - 1, 0))
-        frames = []
-        for idx in idxs:
+        frames, times = [], []
+        for idx, t in zip(idxs, centers):
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
             ok, fr = cap.read()
             if not ok:
                 continue
             fr = cv2.resize(fr, (tw, th), interpolation=cv2.INTER_AREA)
             frames.append(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
-        return frames
+            times.append(float(t))
+        return frames, times
     finally:
         cap.release()
 
@@ -85,7 +93,7 @@ def _decode_pyav(video_path, centers, th, tw):
     tries hardware AV1 on this box)."""
     import av
 
-    frames = []
+    frames, times = [], []
     with av.open(video_path) as container:
         stream = container.streams.video[0]
         tb = stream.time_base
@@ -100,7 +108,8 @@ def _decode_pyav(video_path, centers, th, tw):
                 continue
             arr = got.to_ndarray(format="rgb24")
             frames.append(cv2.resize(arr, (tw, th), interpolation=cv2.INTER_AREA))
-    return frames
+            times.append(float(t))
+    return frames, times
 
 
 def make_proxy(video_path: str) -> str:
@@ -170,62 +179,65 @@ def _decode_span_with_timestamps(
     max_frames: int,
     even: bool = False,
 ) -> tuple[list[np.ndarray], list[float]]:
-    """Decode a span and retain the sampling-plan timestamps for diagnostics."""
+    """Decode a span; returns the frames and THEIR OWN timestamps (see note above)."""
     src = resolve_decodable(video_path)
     centers, fps_v, n_v, th, tw = _plan(src, start, end, max_frames, even)
-    frames = _decode_cv2(src, centers, fps_v, n_v, th, tw)
+    frames, times = _decode_cv2(src, centers, fps_v, n_v, th, tw)
     if len(frames) < 2:  # last resort: software decode of the original
-        frames = _decode_pyav(video_path, centers, th, tw)
+        frames, times = _decode_pyav(video_path, centers, th, tw)
     if len(frames) < 2:
         raise RuntimeError(f"decoded {len(frames)} frames from {video_path}")
     if even and len(frames) % 2:
-        frames = frames[:-1]
-    return frames, centers[: len(frames)].astype(float).tolist()
+        frames, times = frames[:-1], times[:-1]
+    assert len(frames) == len(times), "frame/timestamp desync"
+    return frames, times
 
 
-def _decode_span(video_path: str, start: float | None, end: float | None,
-                 max_frames: int, even: bool = False) -> list[np.ndarray]:
-    frames, _timestamps = _decode_span_with_timestamps(
-        video_path, start, end, max_frames, even
-    )
-    return frames
+# The three public samplers all return (frames, times). Callers that do not need the
+# timestamps just ignore the second value -- that is cheaper than keeping a parallel
+# set of wrappers that throw them away.
 
-
-def initial_frames(video_path: str) -> list:
-    """48 uniformly-sampled PIL frames of the whole video (image modality)."""
-    return [Image.fromarray(f) for f in
-            _decode_span(video_path, None, None, config.INITIAL_FRAMES)]
-
-
-def initial_frames_with_timestamps(video_path: str):
-    """Diagnostic initial-view API with the exact planned sample timestamps."""
-    frames, timestamps = _decode_span_with_timestamps(
-        video_path, None, None, config.INITIAL_FRAMES
-    )
-    return [Image.fromarray(f) for f in frames], timestamps
-
-
-def crop_frames(video_path: str, start: float, end: float) -> list:
-    """<=128 PIL frames at fps=1 over [start, end] (full-detail image modality)."""
-    return [Image.fromarray(f) for f in
-            _decode_span(video_path, start, end, config.CROP_MAX_FRAMES)]
-
-
-def crop_frames_with_timestamps(video_path: str, start: float, end: float):
-    """Diagnostic crop API; production callers keep using ``crop_frames``."""
-    frames, timestamps = _decode_span_with_timestamps(
-        video_path, start, end, config.CROP_MAX_FRAMES
-    )
-    return [Image.fromarray(f) for f in frames], timestamps
-
-
-def compress_tensor(video_path: str, start: float, end: float):
-    """((T,C,H,W) uint8 tensor, frame_times) over [start, end], up to 768 frames,
-    T even (video modality for the FlashVID path). frame_times are the sampled
-    frames' timestamps in seconds — needed for Qwen3-VL's per-frame timestamp
-    text (`<{t:.1f} seconds>` before each temporal group)."""
+def initial_frames_with_timestamps(video_path: str, n_frames: int | None = None):
+    """`n_frames` (default config.INITIAL_FRAMES) uniform PIL frames over the whole
+    video, image modality, plus each frame's timestamp in seconds."""
     frames, times = _decode_span_with_timestamps(
-        video_path, start, end, config.COMPRESS_MAX_FRAMES, even=True
+        video_path, None, None, config.INITIAL_FRAMES if n_frames is None else n_frames
+    )
+    return [Image.fromarray(f) for f in frames], times
+
+
+def initial_frames(video_path: str, n_frames: int | None = None) -> list:
+    return initial_frames_with_timestamps(video_path, n_frames)[0]
+
+
+def crop_frames_with_timestamps(video_path: str, start: float, end: float,
+                                max_frames: int | None = None):
+    """<=CROP_MAX_FRAMES PIL frames at fps=1 over [start, end] (full detail), + times."""
+    frames, times = _decode_span_with_timestamps(
+        video_path, start, end,
+        config.CROP_MAX_FRAMES if max_frames is None else max_frames
+    )
+    return [Image.fromarray(f) for f in frames], times
+
+
+def crop_frames(video_path: str, start: float, end: float,
+                max_frames: int | None = None) -> list:
+    return crop_frames_with_timestamps(video_path, start, end, max_frames)[0]
+
+
+def compress_tensor(video_path: str, start: float, end: float,
+                    max_frames: int | None = None):
+    """((T,C,H,W) uint8 tensor, frame_times) over [start, end], T even (video modality
+    for the FlashVID path). frame_times are the sampled frames' timestamps in seconds —
+    needed for Qwen3-VL's per-frame timestamp text (`<{t:.1f} seconds>` per group).
+
+    `max_frames` defaults to config.COMPRESS_MAX_FRAMES. Pass it explicitly rather than
+    reassigning the config global: experiment scripts used to do the latter, which leaks
+    the setting into whatever runs next if anything raises in between."""
+    frames, times = _decode_span_with_timestamps(
+        video_path, start, end,
+        config.COMPRESS_MAX_FRAMES if max_frames is None else max_frames,
+        even=True,
     )
     return (
         torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).contiguous(),

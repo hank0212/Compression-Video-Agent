@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single-GPU vLLM server for the flip_judge triage VLM (Qwen3-VL-8B).
+# Single-GPU vLLM server for the case_notes reader VLM (Qwen3-VL-8B).
 #
 # Judge payloads are small (<=8 montage PNGs + a few k text tokens), so 32k ctx
 # on ONE GPU is plenty — unlike serve_qwen3vl_baseline.sh's DP3/131k setup.
@@ -7,7 +7,7 @@
 #
 # Usage: ./serve_judge.sh [GPU] [PORT]
 #   GPU   single CUDA device index (default 5)
-#   PORT  default 8010 (repo convention; flip_judge reads $OPENAI_BASE_URL)
+#   PORT  default 8010 (repo convention; judge_client reads $OPENAI_BASE_URL)
 #   GPU_UTIL=0.55 ./serve_judge.sh 5   # shrink footprint on a shared GPU
 #
 # Shared-box etiquette: check `nvidia-smi` for a GPU with >=25 GB free BEFORE
