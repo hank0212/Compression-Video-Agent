@@ -71,11 +71,11 @@ unrelated mechanisms.
 ```
 fast_agent/            the harness
   data.py              LVBench loading, option normalisation
-  run_agent.py         the agent loop (skim -> optional crop rounds -> answer)
+  run_agent.py         the agent loop (skim -> optional crop rounds -> answer),
+                       including the forced-crop oracle and decoy-span control
   run_plain.py         single-shot eval, incl. an lmms-eval-compatible prompt/scorer
   config.py            prompts and tool schemas (LongVT-verbatim + an "informed" variant)
   tools.py             crop_video
-  oracle.py            forced-crop arms (GT span, and a wrong-location control)
   make_skim_proxy.py   pre-builds one small N-frame proxy mp4 per video
   serve_arm.sh         every vLLM server configuration used, arms a..p
   probe_budget.py      measures the REAL visual-token budget of a config
