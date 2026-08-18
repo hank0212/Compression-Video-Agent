@@ -156,27 +156,19 @@ TOOL_SCHEMAS = {
             },
         },
     },
-    "compress_video": {
-        "type": "function",
-        "function": {
-            "name": "compress_video",
-            "description": (
-                "View a COMPRESSED overview of a LONG span (up to the whole video): many "
-                "more frames at the same token cost as crop_video, trading per-frame detail "
-                "for temporal coverage. Use it to LOCATE where the answer is across a wide "
-                "span, then crop_video to zoom in on the exact moment."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "start_time": {"type": "number", "description": "Start time in seconds."},
-                    "end_time": {"type": "number", "description": "End time in seconds, must be greater than start_time."},
-                },
-                "required": ["start_time", "end_time"],
-            },
-        },
-    },
 }
+
+# NOTE 2026-08-17 -- `compress_video` was REMOVED from this schema set.
+# It advertised a compressed wide-span view, but the vLLM agent loop has no way to
+# serve one: compression is a SERVER-side setting (--video-pruning-rate), not a
+# per-call option, and the OpenAI chat API accepts only images or a whole-video URL.
+# The old dispatch in run_agent.py silently answered every accepted tool call with
+# tools.crop_frames regardless of the name, so a compress_video call returned an
+# ordinary crop and the trajectory recorded it under the wrong tool name. No reported
+# run enabled it (LONGVT_TOOL_SCHEMAS and INFORMED_TOOL_SCHEMAS both offer crop_video
+# only, and 0 of 28 manifests list it), so no result changed -- but the schema is gone
+# and the dispatch now raises rather than mis-serving. Re-adding it requires a real
+# server-side compressed view, not a schema entry.
 
 # ---- LongVT-faithful prompt (LongVT/examples/eval/single_inference.py) ----
 # Verbatim from the reference eval, including the `video_path` parameter that our

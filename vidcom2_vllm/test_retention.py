@@ -21,7 +21,8 @@ import sys
 
 import torch
 
-from .retention import _apportion, compute_retention_mask, vidcom2_scores
+from .retention import (_apportion, compute_retention_mask, main_embed_width,
+                        vidcom2_scores)
 
 REF = "/local1/cfyang/VidCom2"
 
@@ -70,6 +71,86 @@ def test_apportion():
     print(f"1b. APPORTION            {'OK' if not bad else f'{bad} FAILURES'} "
           f"(sum==target, 1<=k<=tpf)")
     return not bad
+
+
+def test_apportion_is_hamilton():
+    """The old water-fill satisfied `sum == target` while distributing badly, so the
+    count-only check above passed it. This compares against an independent
+    largest-remainder reference, frame by frame."""
+    def hamilton(ideal, target, lo, hi):
+        k = ideal.floor().long().clamp(lo, hi)
+        diff = target - int(k.sum())
+        order = torch.argsort(ideal - k.to(ideal.dtype),
+                              descending=(diff > 0), stable=True).tolist()
+        step, d = (1 if diff > 0 else -1), abs(diff)
+        while d:
+            moved = 0
+            for i in order:
+                if not d:
+                    break
+                if (step > 0 and k[i] >= hi) or (step < 0 and k[i] <= lo):
+                    continue
+                k[i] += step; d -= 1; moved += 1
+            if not moved:
+                break
+        return k
+
+    torch.manual_seed(0)
+    worst, bad, ncase = 0.0, 0, 0
+    for T, tpf in ((3, 8), (32, 64), (128, 220)):
+        for frac in (0.25, 0.5, 0.9):
+            target = int(T * tpf * frac)
+            raw = torch.rand(T) * tpf
+            ideal = (raw * (target / float(raw.sum()))).clamp(max=float(tpf))
+            k = _apportion(ideal, target, lo=0, hi=tpf)
+            ncase += 1
+            if not torch.equal(k, hamilton(ideal, target, 0, tpf)):
+                bad += 1
+            # The <1-token guarantee only applies when no frame is pinned at the cap;
+            # a clamped ideal legitimately sits far from the integer it is given.
+            if float(ideal.max()) < tpf and abs(float(ideal.sum()) - target) < 1:
+                worst = max(worst, float((k.float() - ideal).abs().max()))
+    ok = bad == 0 and worst < 1.0
+    print(f"1c. APPORTION == HAMILTON {'OK' if ok else 'FAILED'} "
+          f"({ncase - bad}/{ncase} cases match the reference, "
+          f"worst uncapped |k-ideal| {worst:.2f} tokens)")
+    return ok
+
+
+def test_scores_only_main_block():
+    """vLLM hands us cat([main] + deepstack), so scoring must slice the main block.
+    Concatenating a constant DeepStack block must not change the selection."""
+    import longvt_compression.vidcom2_vllm.retention as R
+    T, tpf, hidden = 4, 16, 32
+    torch.manual_seed(0)
+    main = torch.randn(T * tpf, hidden)
+    deep = torch.randn(T * tpf, hidden * 3) * 50.0        # very different scale
+    saved = R._MAIN_WIDTH
+    try:
+        R._MAIN_WIDTH = hidden
+        a = vidcom2_scores(main, T, tpf)[1]
+        b = vidcom2_scores(torch.cat([main, deep], dim=1), T, tpf)[1]
+        same = torch.allclose(a, b, atol=1e-5)
+    finally:
+        R._MAIN_WIDTH = saved
+    print(f"1d. MAIN-BLOCK SCORING   {'OK' if same else 'FAILED -- DeepStack leaked into the score'}")
+    return same
+
+
+def test_scoring_dtype_preserved():
+    """Scoring must not silently upcast: on a real clip the fp32 copies cost ~3.4 GiB."""
+    import longvt_compression.vidcom2_vllm.retention as R
+    T, tpf, hidden = 2, 8, 16
+    saved = R._MAIN_WIDTH
+    try:
+        R._MAIN_WIDTH = hidden
+        x = torch.randn(T * tpf, hidden, dtype=torch.float16)
+        _, score = vidcom2_scores(x, T, tpf)
+        ok = score.dtype == torch.float16
+    finally:
+        R._MAIN_WIDTH = saved
+    print(f"1e. SCORING DTYPE        {'OK (kept fp16)' if ok else f'FAILED (upcast to {score.dtype})'}")
+    return ok
 
 
 def test_matches_reference():

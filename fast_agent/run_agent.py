@@ -462,6 +462,15 @@ def answer_one(client, model: str, row: dict, args) -> dict:
             continue
 
         t_tool = time.time()
+        # Dispatch on the NAME. This used to call crop_frames unconditionally, so any
+        # other accepted tool was silently answered with a crop and recorded in the
+        # trajectory under the wrong name (found in review 2026-08-17). No reported run
+        # was affected -- every arm offered crop_video only -- but a wrong answer is
+        # worse than a loud failure, so an unimplemented tool now raises.
+        if tc["name"] != "crop_video":
+            raise NotImplementedError(
+                f"tool {tc['name']!r} is offered by the schema but not implemented by "
+                f"the vLLM agent loop; only crop_video is served here")
         frames = tools.crop_frames(row["video_path"], s, e)
         rec["tool_result"] = {"tool": tc["name"], "span": [s, e], "n_frames": len(frames)}
         rec["tool_seconds"] = round(time.time() - t_tool, 2)

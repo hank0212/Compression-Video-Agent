@@ -225,29 +225,10 @@ def crop_frames(video_path: str, start: float, end: float,
     return crop_frames_with_timestamps(video_path, start, end, max_frames)[0]
 
 
-def compress_tensor(video_path: str, start: float, end: float,
-                    max_frames: int | None = None):
-    """((T,C,H,W) uint8 tensor, frame_times) over [start, end], T even (video modality
-    for the FlashVID path). frame_times are the sampled frames' timestamps in seconds —
-    needed for Qwen3-VL's per-frame timestamp text (`<{t:.1f} seconds>` per group).
-
-    `max_frames` defaults to config.COMPRESS_MAX_FRAMES. Pass it explicitly rather than
-    reassigning the config global: experiment scripts used to do the latter, which leaks
-    the setting into whatever runs next if anything raises in between."""
-    frames, times = _decode_span_with_timestamps(
-        video_path, start, end,
-        config.COMPRESS_MAX_FRAMES if max_frames is None else max_frames,
-        even=True,
-    )
-    return (
-        torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).contiguous(),
-        times,
-    )
-
-
-_TIME_STR_RE = re.compile(r"^\s*(\d+):([0-5]?\d)(?::([0-5]?\d))?\s*$")
-
-
+# `compress_tensor` was removed 2026-08-17. It returned a raw (T,C,H,W) tensor for the
+# local HuggingFace FlashVID path, which no longer exists -- every arm runs against a vLLM
+# server, and the OpenAI chat API cannot accept a bare tensor. Compression is configured
+# server-side via --video-pruning-rate; see fast_agent/serve_arm.sh.
 def parse_time_arg(v) -> float | None:
     """Accept whatever format the model emits for a time argument and return seconds.
     Handles: 1036, 1036.5, "1036", "1036s", "17:16" (m:ss), "1:06:37" (h:mm:ss).
