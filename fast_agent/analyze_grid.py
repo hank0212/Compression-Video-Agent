@@ -27,9 +27,9 @@ ARMS = {
     ("EVS",     128): "lvbench_pD_128f_evs_050_seed0",
     ("EVS",     256): "lvbench_d5_k_256f_evs_seed0",
     ("VidCom2", 128): "lvbench_pC2_128f_vidcom2_050_FIXED_seed0",
-    ("VidCom2", 256): "lvbench_d4_i_256f_vidcom2_seed0",   # pre-fix; flagged in output
+    ("VidCom2", 256): "lvbench_pI2_256f_vidcom2_025_FIXED_seed0",
 }
-PREFIX_UNFIXED = {("VidCom2", 256)}
+PREFIX_UNFIXED = set()   # all VidCom2 arms now run the post-2026-08-17 fixed plugin
 
 
 def load(tag):

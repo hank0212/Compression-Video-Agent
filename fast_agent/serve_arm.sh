@@ -22,19 +22,21 @@ COMMON=(
   --served-model-name qwen3vl
   # 40960 fits every arm whose video budget is the stock 12,288-token cap. Arm l ships
   # 49,152 visual tokens and MUST raise it; KV is 144 KiB/token, so the cost is real.
-  --max-model-len "${MAXLEN:-40960}"
+  # --max-model-len and --max-num-batched-tokens moved OUT of COMMON: they are a
+  # PROPERTY OF THE ARM (they scale with the visual-token count), and defaulting them
+  # here meant an arm could launch with sizing that silently did not fit its own video.
+  # They are set per-arm in the case block below and assembled into SIZING afterwards.
   # == encoder cache size, and it is a HARD per-item limit: vLLM 400s with "video item
   # with length N exceeds the pre-allocated encoder cache size" when one multimodal item
   # is bigger. The pruned arms slip under it because the cache holds POST-prune
   # embeddings (arm i's 4x-cap video is 49k pre-prune but 12k after), so only the
   # UNPRUNED high-budget arm (l) has to raise it. 16384 fits a 128-image crop (6,016).
-  --max-num-batched-tokens "${BATCHTOK:-16384}"
+
   # 0.88 assumes an empty card. Other users' processes come and go on this box, and vLLM
   # refuses to start if the *free* fraction is below this -- so it is overridable. It only
   # sizes the KV cache (throughput), never the arithmetic, but keep it IDENTICAL across the
   # two arms of a comparison so the pair differs by one thing.
   --gpu-memory-utilization "${GPUUTIL:-0.88}"
-  --limit-mm-per-prompt '{"image":768,"video":2}'
   --allowed-local-media-path /local1/cfyang   # file:// video for the arm-B skim
   # THE FIX FOR THE RECURRING SERVER WEDGE (2026-08-13). vLLM caches processed
   # multimodal items in the API process and ships only a hash to EngineCore, which looks
@@ -52,6 +54,37 @@ COMMON=(
   --tool-call-parser hermes
 )
 
+# Per-frame-count cap = (frames/2) * 880 * 2048, i.e. exactly the native-resolution token
+# count for that many frames. All three still render at 704x1280 (verified), so resolution
+# is identical across arms -- but the cap is now the SMALLEST value that achieves it.
+#
+# It cannot be one big saturating number: vLLM sizes its startup PROFILING dummy video from
+# the processor ceiling (longest_edge/2/1024 tokens) and ignores --media-io-kwargs
+# num_frames, so a 230,686,720 cap profiles a 112,640-token video for every arm. That
+# overruns max-num-batched-tokens, and on the PRUNED arms the retained-count then disagrees
+# with the placeholder count and vLLM dies in masked_scatter. Confirmed not to be our
+# plugin: vLLM's own EVS selector fails identically at that cap.
+# The cap a grid arm needs depends on whether it PRUNES, because vLLM merges the visual
+# embeddings by two different routes:
+#
+#   PRUNED arms take _postprocess_video_embeds_evs, which recomputes the retained count
+#   from the real grid. A tight cap -- exactly (frames/2)*880*2048, the native-resolution
+#   token count -- is required there, because vLLM sizes its startup PROFILING dummy video
+#   from the processor ceiling (cap/2/1024) and ignores --media-io-kwargs num_frames. A
+#   generous cap makes that dummy overrun max-num-batched-tokens and the pruned path dies
+#   in masked_scatter before serving anything.  (Verified: v64_50 and v128 run clean here.)
+#
+#   UNPRUNED arms take _compute_deepstack_embeds, and there a tight cap fails at INFERENCE
+#   time -- the same masked_scatter error, on every full-resolution video, while the 16
+#   smaller-source videos still succeed. A generous cap fixes it.  (Verified: u32 fails at
+#   ceiling 14,080 and at 15,488, and is clean at 112,640.)
+#
+# Both routes end up at the SAME geometry -- 704x1280, 880 tokens per grid step -- which
+# preflight_arm.py re-measures over all 103 videos for every arm. The cap is therefore a
+# serving parameter here, not an experimental one; the resolution it produces is checked
+# independently and is identical across the grid.
+CAP_GENEROUS=230686720
+cap_for () { if [ -z "${RATE:-}" ]; then echo $CAP_GENEROUS; else echo $(( ($1/2) * 880 * 2048 )); fi; }
 case "${1:?usage: serve_arm.sh a|b|c|d}" in
   a) GPU=4; PORT=8030
      # run1 + run2: 64-frame video skim, NO pruning. num_frames is what makes the
@@ -217,8 +250,66 @@ case "${1:?usage: serve_arm.sh a|b|c|d}" in
      EXTRA=(--media-io-kwargs '{"video":{"num_frames":128}}' --video-pruning-rate 0.50)
      MMKW='{"max_pixels":786432,"min_pixels":3136,"size":{"longest_edge":50331648,"shortest_edge":4096}}'
      export FA_PRUNE_METHOD=evs ;;
-  *) echo "usage: serve_arm.sh a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p" >&2; exit 1 ;;
+  # ---- THE FRAMES x RETENTION GRID (frozen 2026-08-19) --------------------------
+  # Six primary arms + one iso-budget enhancement. TWO variables only: frame count and
+  # VidCom2 retention. Everything else -- including spatial resolution -- is identical.
+  #
+  #                    no compression        VidCom2 25%
+  #     32 frames           u32                  v32
+  #     64 frames           u64                  v64
+  #    128 frames          u128                 v128
+  #     64 frames                            v64_50  (50%, the iso-budget midpoint)
+  #
+  # WHY ONE CAP FOR EVERY ARM
+  #   Qwen3-VL's video processor spends `size.longest_edge` across the WHOLE clip, so at
+  #   the stock cap more frames silently means blurrier frames -- which confounds "more
+  #   observations" with "less spatial fidelity" and is exactly the flaw in the earlier
+  #   iso-token grid. 230,686,720 is past the point where the LVBench sources become the
+  #   binding constraint (measured: raising it further does not change grid_thw), so every
+  #   arm renders at the source's native resolution -- 704x1280, 880 tokens per grid step,
+  #   for the 86 of 103 videos that are 1280x720. Resolution is therefore fixed BY
+  #   SATURATION rather than by a per-arm cap that has to track the frame count.
+  #
+  # GRID STEPS, NOT FRAMES. temporal_patch_size=2, so N frames -> N/2 grid steps, and
+  # VidCom2 allocates over the grid steps:
+  #     32f -> 16 steps -> 14,080 visual     64f -> 32 -> 28,160     128f -> 64 -> 56,320
+  #
+  # --video-pruning-rate is the DROP fraction: retention 0.25 -> rate 0.75.
+  #
+  # SIZING. max-num-batched-tokens is the encoder-cache size and is a hard per-item
+  # limit, so it must exceed the arm's PRE-prune visual count even when pruning is on
+  # (the compressed arms still push the full clip through the vision tower).
+  u32)    GPU=3; PORT=8061; FRAMES=32;  RATE=""     ; MAXLEN=${MAXLEN:-16384}; BATCHTOK=${BATCHTOK:-16384} ;;
+  v32)    GPU=3; PORT=8062; FRAMES=32;  RATE=0.75   ; MAXLEN=${MAXLEN:-16384}; BATCHTOK=${BATCHTOK:-16384} ;;
+  u64)    GPU=3; PORT=8063; FRAMES=64;  RATE=""     ; MAXLEN=${MAXLEN:-32768}; BATCHTOK=${BATCHTOK:-32768} ;;
+  v64)    GPU=3; PORT=8064; FRAMES=64;  RATE=0.75   ; MAXLEN=${MAXLEN:-32768}; BATCHTOK=${BATCHTOK:-30720} ;;
+  v64_50) GPU=3; PORT=8065; FRAMES=64;  RATE=0.50   ; MAXLEN=${MAXLEN:-32768}; BATCHTOK=${BATCHTOK:-30720} ;;
+  u128)   GPU=3; PORT=8066; FRAMES=128; RATE=""     ; MAXLEN=${MAXLEN:-63488}; BATCHTOK=${BATCHTOK:-63488} ;;
+  v128)   GPU=3; PORT=8067; FRAMES=128; RATE=0.75   ; MAXLEN=${MAXLEN:-61440}; BATCHTOK=${BATCHTOK:-57344} ;;
+  *) echo "usage: serve_arm.sh a..p | u32|v32|u64|v64|v64_50|u128|v128" >&2; exit 1 ;;
 esac
+
+# The grid arms declare FRAMES/RATE instead of EXTRA/MMKW, so assemble them here -- one
+# place, so the seven arms cannot drift apart in anything but frames and retention.
+if [ -n "${FRAMES:-}" ]; then
+  EXTRA=(--media-io-kwargs "{\"video\":{\"num_frames\":$FRAMES}}")
+  [ -n "${RATE:-}" ] && EXTRA+=(--video-pruning-rate "$RATE")
+  MMKW="{\"size\":{\"longest_edge\":$(cap_for $FRAMES),\"shortest_edge\":4096}}"
+  MMLIMIT='{"image":0,"video":1}'
+  # PRUNE_FORCE lets a diagnostic swap in vLLM's built-in EVS selector to tell a plugin
+  # bug apart from a vLLM one, without touching the arm definition.
+  export FA_PRUNE_METHOD=${PRUNE_FORCE:-vidcom2}
+fi
+
+# Sizing is per-arm (see the grid block); the legacy arms keep the old defaults.
+# --limit-mm-per-prompt belongs here too: vLLM sizes its startup PROFILING run from these
+# limits, so a no-tool arm left at the tool arms' 768-image worst case profiles for 768
+# dummy images it will never receive -- which OOMs a native-resolution arm before it
+# serves a single request. 768/2 is the five-crop-round ceiling the TOOL arms genuinely
+# need; the grid arms send one video and no images, ever.
+SIZING=(--max-model-len "${MAXLEN:-40960}"
+        --max-num-batched-tokens "${BATCHTOK:-16384}"
+        --limit-mm-per-prompt "${MMLIMIT:-{\"image\":768,\"video\":2\}}")
 
 # Per-frame pixel budget. Default is LongVT's 224^2; arms e/f raise it (see above).
 MMKW=${MMKW:-'{"max_pixels":50176,"min_pixels":3136}'}
@@ -232,7 +323,14 @@ GPU=${GPU_FORCE:-$GPU}
 PORT=${PORT_FORCE:-$PORT}
 
 echo "arm=$1 gpu=$GPU port=$PORT prune=$FA_PRUNE_METHOD mm=$MMKW"
+# GPU may be a comma list for tensor parallelism -- u128 needs it. Its profiling dummy is
+# 56,320+ visual tokens, and the vision-tower forward on that peaks around 17 GiB; with
+# 16.4 GiB of weights there is not enough left on one 48 GiB card for the 8.7 GiB of KV a
+# 57k-token context needs. vLLM subtracts the measured activation peak from the
+# gpu-memory-utilization budget, so raising util does not help -- only splitting does.
+TP=$(awk -F, '{print NF}' <<< "$GPU")
+[ "$TP" -gt 1 ] && SIZING+=(--tensor-parallel-size "$TP")
 CUDA_VISIBLE_DEVICES=$GPU nohup "$PY/vllm" serve "$MODEL" \
-  --port "$PORT" "${COMMON[@]}" --mm-processor-kwargs "$MMKW" "${EXTRA[@]}" \
+  --port "$PORT" "${COMMON[@]}" "${SIZING[@]}" --mm-processor-kwargs "$MMKW" "${EXTRA[@]}" \
   >> "$LOG/server_arm_$1.log" 2>&1 &
 echo "pid $! -> $LOG/server_arm_$1.log"

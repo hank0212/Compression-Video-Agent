@@ -35,10 +35,20 @@ OUT = "/local1/cfyang/hanklin/outputs/lvbench_agent"
 
 # (label, run dir, proxy dir, frames, expected visual-token budget)
 ARMS = [
-    ("e 32f no-prune",  "lvbench_d3_e_nopruning_seed0",  "skim_proxies_hires",     32,  12288),
-    ("f 32f VidCom2",   "lvbench_d3_f_vidcom2_seed0",    "skim_proxies_hires",     32,   3072),
-    ("g 64f no-prune",  "lvbench_d4_g_64f_noprune_seed0","skim_proxies_hires_64",  64,  12288),
-    ("i 256f VidCom2",  "lvbench_d4_i_256f_vidcom2_seed0","skim_proxies_hires_256",256, 12288),
+    # The native-resolution grid: 880 tokens per grid step BEFORE pruning. Design tokens
+    # are (frames/2) * 880 * (1 - rate). Arms are matched on that DESIGN number, never on
+    # prompt_tokens, which carries a <t seconds> tax that grows with frame count.
+    ("u32   32f  none",  "lvbench_u32_native_seed0",       "skim_proxies_hires_32",   32, 14080),
+    ("v32   32f  r=.25", "lvbench_v32_native_r025_seed0",  "skim_proxies_hires_32",   32,  3520),
+    ("u64   64f  none",  "lvbench_u64_native_seed0",       "skim_proxies_hires_64",   64, 28160),
+    ("v64   64f  r=.25", "lvbench_v64_native_r025_seed0",  "skim_proxies_hires_64",   64,  7040),
+    ("v64_50 64f r=.50", "lvbench_v64_native_r050_seed0",  "skim_proxies_hires_64",   64, 14080),
+    ("v128 128f  r=.25", "lvbench_v128_native_r025_seed0", "skim_proxies_hires_128", 128, 14080),
+    # u128 (128f uncompressed, 56,320 tokens) is ABSENT on purpose: vLLM 0.19 dies in
+    # masked_scatter on full-resolution videos in the unpruned DeepStack path at that size,
+    # at every cap / encoder-cache combination tried. Running it anyway would record the
+    # failures as pred=None, correct=False and produce a below-chance score that looks like
+    # a result rather than an outage.
 ]
 
 
