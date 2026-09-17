@@ -1,0 +1,64 @@
+diff --git a/flashvid_vllm/__init__.py b/flashvid_vllm/__init__.py
+index ad96ea8..343dab6 100644
+--- a/flashvid_vllm/__init__.py
++++ b/flashvid_vllm/__init__.py
+@@ -25,9 +25,20 @@ logger = logging.getLogger("flashvid_vllm")
+ 
+ _PATCHED = False
+ 
++# vLLM's data-parallel workers are spawned with a scrubbed env (custom vars like
++# FLASHVID_ENABLE do NOT propagate to EngineCore workers, where the model and
++# register() actually run). A sentinel FILE is process-independent, so it is the
++# reliable gate; the launch scripts create/remove it. The env var still works in
++# processes where it propagates.
++_SENTINEL = os.environ.get(
++    "FLASHVID_SENTINEL", "/home/cfyang/hanklin/_archive/flashvid_plugin/FLASHVID_ON"
++)
++
+ 
+ def _enabled() -> bool:
+-    return os.environ.get("FLASHVID_ENABLE", "0") not in ("0", "", "false", "False")
++    if os.environ.get("FLASHVID_ENABLE", "0") not in ("0", "", "false", "False"):
++        return True
++    return os.path.exists(_SENTINEL)
+ 
+ 
+ def register() -> None:
+diff --git a/flashvid_vllm/compression.py b/flashvid_vllm/compression.py
+index 485088d..9e9bb97 100644
+--- a/flashvid_vllm/compression.py
++++ b/flashvid_vllm/compression.py
+@@ -103,9 +103,10 @@ def make_evs_compatible_mask_fn(orig_fn):
+     Falls back to ``orig_fn`` (stock EVS) on ANY error — the server never
+     crashes because of FlashVID.
+     """
+-    from .flashvid_core.utils import FlashVidConfig as _unused  # noqa: F401
+     from vllm.multimodal.evs import compute_retained_tokens_count
+ 
++    fired = {"done": False}
++
+     def compute_retention_mask(video_embeds, video_size_thw, spatial_merge_size, q):
+         try:
+             t, h, w = (int(x) for x in video_size_thw)
+@@ -113,9 +114,20 @@ def make_evs_compatible_mask_fn(orig_fn):
+             num_keep = compute_retained_tokens_count(
+                 tokens_per_frame=tokens_per_frame, num_frames=t, q=q
+             )
+-            return flashvid_retention_mask(
++            mask = flashvid_retention_mask(
+                 video_embeds, video_size_thw, spatial_merge_size, num_keep
+             )
++            if not fired["done"]:
++                fired["done"] = True
++                import sys
++
++                print(
++                    f"[FLASHVID] mask FIRED: T={t} tokens/frame={tokens_per_frame} "
++                    f"-> kept {int(mask.sum())}/{t * tokens_per_frame}",
++                    file=sys.stderr,
++                    flush=True,
++                )
++            return mask
+         except Exception as e:  # noqa: BLE001 — reversibility: degrade to stock EVS
+             import logging
+ 

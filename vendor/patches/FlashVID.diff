@@ -1,0 +1,349 @@
+diff --git a/flashvid/modeling_qwen3_vl.py b/flashvid/modeling_qwen3_vl.py
+index ffb86b5..bb6d55b 100644
+--- a/flashvid/modeling_qwen3_vl.py
++++ b/flashvid/modeling_qwen3_vl.py
+@@ -208,7 +208,7 @@ def Qwen3VLModel_forward(
+     video_mask = None
+ 
+     if pixel_values is not None:
+-        image_embeds, deepstack_image_embeds = self.get_image_features(pixel_values, image_grid_thw)
++        image_embeds, deepstack_image_embeds, _cls_attn = self.get_image_features(pixel_values, image_grid_thw)
+         image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+         image_mask, _ = self.get_placeholder_mask(
+             input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
+@@ -296,7 +296,8 @@ def Qwen3VLModel_forward(
+             position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+ 
+     ### ! Applies FlashVid compression here.
+-    if position_ids.shape[-1] > 1:
++    # Only compress when video input exists (cls_attention is set in the video path)
++    if position_ids.shape[-1] > 1 and pixel_values_videos is not None:
+         num_frames, num_visual_tokens = cls_attention.shape
+         flashvid_config: FlashVidConfig = getattr(self, "flashvid_config")
+         # Store feature map resolution.
+@@ -440,23 +441,25 @@ def Qwen3VLTextModel_forward(
+             elif layer_idx == flashvid_config.pruning_layer:
+                 kwargs["output_attentions"] = False
+                 attn = layer_outputs[1]
+-                (
+-                    hidden_states,
+-                    attention_mask,
+-                    text_position_ids,
+-                    cache_position,
+-                    position_embeddings,
+-                    _,
+-                ) = fastv_prune(
+-                    hidden_states=hidden_states,
+-                    causal_mask=attention_mask,
+-                    attentions=attn,
+-                    cache_position=cache_position,
+-                    position_ids=text_position_ids,
+-                    position_embeddings=position_embeddings,
+-                    flashvid_config=flashvid_config,
+-                    visual_pos_masks=visual_pos_masks,
+-                )
++                # Only prune if video compression was done (visual_token_start_index is set)
++                if flashvid_config.visual_token_start_index is not None:
++                    (
++                        hidden_states,
++                        attention_mask,
++                        text_position_ids,
++                        cache_position,
++                        position_embeddings,
++                        _,
++                    ) = fastv_prune(
++                        hidden_states=hidden_states,
++                        causal_mask=attention_mask,
++                        attentions=attn,
++                        cache_position=cache_position,
++                        position_ids=text_position_ids,
++                        position_embeddings=position_embeddings,
++                        flashvid_config=flashvid_config,
++                        visual_pos_masks=visual_pos_masks,
++                    )
+ 
+         layer_outputs = decoder_layer(
+             hidden_states,
+diff --git a/flashvid/utils.py b/flashvid/utils.py
+index b29ef8b..928b8b5 100644
+--- a/flashvid/utils.py
++++ b/flashvid/utils.py
+@@ -306,10 +306,18 @@ def spatiotemporal_compression(
+ 
+     # Ensure the number of retained tokens after TAM does not exceed the lower bound.
+     if retaining_token_mask.int().sum() < lower_bound:
+-        soft_threshold = padded_max_sims.view(-1).topk(k=(num_frames * num_visual_tokens) - lower_bound).values[-1]
+-        soft_threshold = max(soft_threshold, -1.0 + 1e-6)
+-        mask = padded_max_sims > soft_threshold
+-        retaining_token_mask = ~mask
++        num_to_merge = (num_frames * num_visual_tokens) - lower_bound
++        if num_to_merge <= 0:
++            # The retention floor (inflated by expansion) requests at least as many
++            # tokens as exist, so there is nothing to merge — keep every token.
++            # (Happens at high retention_ratio, e.g. retention * expansion >= 1.)
++            mask = torch.zeros_like(padded_max_sims, dtype=torch.bool)
++            retaining_token_mask = ~mask
++        else:
++            soft_threshold = padded_max_sims.view(-1).topk(k=num_to_merge).values[-1]
++            soft_threshold = max(soft_threshold, -1.0 + 1e-6)
++            mask = padded_max_sims > soft_threshold
++            retaining_token_mask = ~mask
+ 
+     for frame_idx in range(num_frames - 1, -1, -1):
+         frame_features = video_features[frame_idx]
+diff --git a/lmms-eval/lmms_eval/evaluator.py b/lmms-eval/lmms_eval/evaluator.py
+index 642949a..fa3c42c 100755
+--- a/lmms-eval/lmms_eval/evaluator.py
++++ b/lmms-eval/lmms_eval/evaluator.py
+@@ -540,7 +540,9 @@ def evaluate(
+                 instances_rnk = torch.tensor(len(task._instances), device=lm.device)
+                 gathered_item = lm.accelerator.gather(instances_rnk).cpu().detach().numpy().tolist()
+             elif distributed_executor_backend == "torchrun":
+-                instances_rnk = torch.tensor(len(task._instances), device=lm.device)
++                # Shape (1,), not 0-dim: gloo's allgather rejects scalar inputs
++                # (CPU-only clients fall back to gloo; nccl tolerated the 0-dim).
++                instances_rnk = torch.tensor([len(task._instances)], device=lm.device)
+                 gathered_item = torch.zeros(world_size * 1, dtype=instances_rnk.dtype, device=lm.device)
+                 dist.all_gather_into_tensor(gathered_item, instances_rnk)
+                 gathered_item = gathered_item.cpu().detach().numpy().tolist()
+diff --git a/lmms-eval/lmms_eval/models/chat/async_openai.py b/lmms-eval/lmms_eval/models/chat/async_openai.py
+index 1ab58ff..5288023 100644
+--- a/lmms-eval/lmms_eval/models/chat/async_openai.py
++++ b/lmms-eval/lmms_eval/models/chat/async_openai.py
+@@ -1,6 +1,9 @@
+ import asyncio
++import base64
+ import os
++import re
+ import shutil
++import subprocess
+ import tempfile
+ import uuid
+ from multiprocessing import cpu_count
+@@ -48,6 +51,11 @@ class AsyncOpenAIChat(lmms):
+         max_pixels: Optional[int] = 151200,
+         min_pixels: Optional[int] = 28 * 28,
+         is_qwen3_vl: bool = False,
++        retain_tool_history: bool = False,
++        max_tool_rounds: Optional[int] = None,
++        force_final_answer: bool = False,
++        max_total_images: Optional[int] = None,
++        video_tool_names: str = "",
+         **kwargs,
+     ) -> None:
+         super().__init__()
+@@ -69,6 +77,34 @@ class AsyncOpenAIChat(lmms):
+         self.min_pixels = min_pixels
+         self.max_frames = max_frames
+         self.is_qwen3_vl = is_qwen3_vl
++        # retain_tool_history: keep every round's tool responses in the running
++        # conversation. Stock behavior (False) sends only the CURRENT round's
++        # tool result — earlier crops vanish from context, so multi-round
++        # evidence gathering degenerates into re-cropping loops.
++        # max_tool_rounds: after this many rounds the next request is sent
++        # without tools, forcing a final answer (None = unlimited, stock).
++        self.retain_tool_history = retain_tool_history
++        self.max_tool_rounds = max_tool_rounds
++        # force_final_answer: if the finished trace has no <answer> tag, issue
++        # one extra tool-less turn demanding the tagged answer. Separates
++        # "couldn't answer" from "didn't format" for zero-shot (pre-SFT) agents.
++        self.force_final_answer = force_final_answer
++        # max_total_images: hard budget on images accumulated in one conversation.
++        # max_tool_rounds caps ROUNDS, but a round may carry several parallel
++        # tool calls (each up to ~128 frames), so rounds alone can exceed the
++        # server's per-prompt image limit (vLLM --limit-mm-per-prompt.image ->
++        # HTTP 400 "At most N image(s)"). Once the budget is reached, further
++        # tool results are replaced with a notice and tools are withheld.
++        # Set it <= server limit minus one tool call's worth of frames.
++        self.max_total_images = max_total_images
++        # video_tool_names: comma-separated tool names whose result is a
++        # "[VIDEO_CLIP] video_path=<p> start=<s> end=<e>" marker (see
++        # examples/video_tools/mcp_server_flashvid.py:compress_video) rather than
++        # images. The client cuts the clip client-side and attaches it as a
++        # video_url content part, so it hits the SERVING ENGINE's video-modality
++        # path (where vLLM EVS / the FlashVID plugin prunes tokens) instead of
++        # the image path. Videos do not count toward max_total_images.
++        self.video_tool_names = {n.strip() for n in video_tool_names.split(",") if n.strip()}
+         if mcp_server_path is not None:
+             self.mcp_client = MCPClient(mcp_server_path)
+             os.makedirs(self.work_dir, exist_ok=True)
+@@ -112,6 +148,43 @@ class AsyncOpenAIChat(lmms):
+     def world_size(self):
+         return self._world_size
+ 
++    _VIDEO_CLIP_RE = re.compile(r"\[VIDEO_CLIP\]\s+video_path=(\S+)\s+start=([\d.]+)\s+end=([\d.]+)")
++
++    async def _cut_video_clip_content(self, marker_text: str) -> List[dict]:
++        """Parse a "[VIDEO_CLIP] video_path=<p> start=<s> end=<e>" marker, cut the
++        span client-side with ffmpeg, and return OpenAI tool-message content with
++        a video_url part. Falls back to a text-only error part on any failure —
++        this must never crash the sample, mirroring the rest of this loop."""
++        m = self._VIDEO_CLIP_RE.search(marker_text)
++        if not m:
++            return [{"type": "text", "text": marker_text}]
++        video_path, start, end = m.group(1), float(m.group(2)), float(m.group(3))
++        out_path = os.path.join(self.work_dir, f"clip_{uuid.uuid4()}.mp4")
++        cmd = [
++            "/usr/bin/ffmpeg", "-y", "-loglevel", "error",
++            "-ss", str(start), "-t", str(max(end - start, 0.1)),
++            "-i", video_path,
++            "-vf", "scale='min(448,iw)':-2",
++            "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
++            out_path,
++        ]
++        try:
++            proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, timeout=120)
++            if proc.returncode != 0 or not os.path.exists(out_path):
++                raise RuntimeError(proc.stderr.decode("utf-8", "replace")[:500])
++            with open(out_path, "rb") as f:
++                b64 = base64.b64encode(f.read()).decode("utf-8")
++            return [
++                {"type": "text", "text": f"Compressed overview of {start:.1f}s-{end:.1f}s:"},
++                {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{b64}"}},
++            ]
++        except Exception as e:
++            eval_logger.warning(f"video clip tool: ffmpeg cut failed for {video_path} [{start},{end}]: {e}")
++            return [{"type": "text", "text": f"[video clip unavailable: {e}]"}]
++        finally:
++            if os.path.exists(out_path):
++                os.remove(out_path)
++
+     def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
+         assert False, "TODO, not implemented"
+ 
+@@ -190,7 +263,15 @@ class AsyncOpenAIChat(lmms):
+         except Exception as e:
+             all_response += f"Error: {str(e)}"
+ 
++        tool_rounds = 0
++        total_images = sum(
++            1
++            for m in messages
++            for c in (m.get("content") or [])
++            if isinstance(c, dict) and c.get("type") == "image_url"
++        )
+         while response.choices[0].finish_reason == "tool_calls":
++            tool_rounds += 1
+             messages.append({"role": "assistant", "content": last_response})
+             messages.append(
+                 {
+@@ -203,33 +284,89 @@ class AsyncOpenAIChat(lmms):
+             if message.tool_calls:
+                 eval_logger.debug("Calling tool with MCP client")
+                 for call in message.tool_calls:
++                    if self.max_total_images is not None and total_images >= self.max_total_images:
++                        notice = "Tool result omitted: image budget exhausted. Answer with the evidence you already have."
++                        tool_messages.append({"role": "tool", "name": call.function.name, "content": [{"type": "text", "text": notice}]})
++                        all_response += f"<tool_call>{call.function.name} {call.function.arguments}</tool_call><tool_response>[{notice}]</tool_response>"
++                        continue
+                     eval_logger.debug(f"Calling {call.function.name}...")
+                     result = await self.mcp_client.run_tool(call.function.name, eval(call.function.arguments))
+                     all_response += f"<tool_call>{call.function.name} {call.function.arguments}</tool_call></tool_response>"
+                     tool_messages.append({"role": "tool", "name": call.function.name, "content": []})
++                    if call.function.name in self.video_tool_names:
++                        # Video-returning tool (e.g. compress_video): the MCP server
++                        # only validated the span and returned a marker; the actual
++                        # clip is cut HERE so it can be attached as video_url, not
++                        # image_url — see _cut_video_clip_content docstring.
++                        marker_text = "".join(c.text for c in result.content if hasattr(c, "text"))
++                        video_content = await self._cut_video_clip_content(marker_text)
++                        for content in video_content:
++                            all_response += "<video_url>" if content["type"] == "video_url" else content.get("text", "")
++                        tool_messages[-1]["content"].extend(video_content)
++                        all_response += "</tool_response>"
++                        continue
+                     for content in result.content:
+                         tool_message = self.mcp_client.convert_result_to_openai_format(content)
+                         for content in tool_message:
+                             if content["type"] == "image_url":
+                                 all_response += "<image_url>"
++                                total_images += 1
+                             elif content["type"] == "text":
+                                 all_response += content["text"]
+                         tool_messages[-1]["content"].extend(tool_message)
+                     all_response += "</tool_response>"
+ 
+-            response = await self.client.chat.completions.create(
+-                model=self.model_version,
+-                messages=messages + tool_messages,
+-                max_tokens=gen_kwargs["max_new_tokens"],
+-                temperature=gen_kwargs["temperature"],
+-                tools=functions,
+-                tool_choice="auto",
++            if self.retain_tool_history:
++                messages.extend(tool_messages)
++                next_messages = messages
++            else:
++                next_messages = messages + tool_messages
++
++            out_of_rounds = (self.max_tool_rounds is not None and tool_rounds >= self.max_tool_rounds) or (
++                self.max_total_images is not None and total_images >= self.max_total_images
+             )
++            next_payload = {
++                "model": self.model_version,
++                "messages": next_messages,
++                "max_tokens": gen_kwargs["max_new_tokens"],
++                "temperature": gen_kwargs["temperature"],
++            }
++            if not out_of_rounds:
++                # Withhold tools once the round budget is spent -> model must answer.
++                next_payload["tools"] = functions
++                next_payload["tool_choice"] = "auto"
++            response = await self.client.chat.completions.create(**next_payload)
+             last_response = response.choices[0].message.content
+             try:
+                 all_response += last_response
+             except Exception as e:
+                 all_response += str(e)
++        if self.force_final_answer and "<answer>" not in all_response:
++            messages.append({"role": "assistant", "content": last_response or ""})
++            messages.append(
++                {
++                    "role": "user",
++                    "content": [
++                        {
++                            "type": "text",
++                            "text": (
++                                "Based on your investigation so far, provide your final "
++                                "answer now. Format strictly as <answer>...</answer>."
++                            ),
++                        }
++                    ],
++                }
++            )
++            response = await self.client.chat.completions.create(
++                model=self.model_version,
++                messages=messages,
++                max_tokens=1024,
++                temperature=gen_kwargs["temperature"],
++            )
++            forced = response.choices[0].message.content
++            if forced:
++                all_response += forced
++
+         self.add_request_response_to_cache(request, all_response)
+         return all_response, idx
+ 
+@@ -244,7 +381,21 @@ class AsyncOpenAIChat(lmms):
+ 
+             async def _process(req, idx):
+                 async with sem:
+-                    return await self.maybe_forward_with_tool(req, idx)
++                    # "Already borrowed": vLLM HF-tokenizer thread-safety race under
++                    # concurrent requests (hermes tool parser) — transient, retry.
++                    for attempt in range(4):
++                        try:
++                            return await self.maybe_forward_with_tool(req, idx)
++                        except Exception as e:
++                            transient = "Already borrowed" in str(e) or "Internal Server Error" in str(e)
++                            if transient and attempt < 3:
++                                eval_logger.warning(f"Sample {idx} transient error (attempt {attempt + 1}): {e}")
++                                await asyncio.sleep(2**attempt)
++                                continue
++                            # One bad sample (context overflow, tool crash, ...) must
++                            # not kill the whole run; score it 0 and move on.
++                            eval_logger.error(f"Sample {idx} failed: {type(e).__name__}: {e}")
++                            return f"[EVAL_ERROR] {type(e).__name__}: {e}", idx
+ 
+             tasks = [asyncio.create_task(_process(req, idx)) for idx, req in enumerate(requests)]
+             for task in asyncio.as_completed(tasks):

@@ -2,6 +2,11 @@
 
 > Reading this to review it? Start with [ARCHITECTURE.md](ARCHITECTURE.md) — it explains
 > the design, the invariants that silently break, and where the author is least confident.
+>
+> Setting this up on a new machine, or an agent picking the work up cold? Start with
+> [HANDOFF.md](HANDOFF.md) — repo map, paths to rewrite, environment pins, how to launch the
+> five runs, the gotchas that have already cost real time, and an honest assessment of what
+> starting RL would actually take. Research state lives in [RESEARCH.md](RESEARCH.md).
 
 Answer, on LVBench with Qwen3-VL-8B-Instruct: **no.** At a matched visual-token budget,
 two mechanically unrelated token-selection heuristics (VidCom2 and EVS) both land *below*
