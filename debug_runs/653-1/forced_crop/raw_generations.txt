@@ -1,6 +1,0 @@
-=== generation 1 ===
-The question asks for the number of people in the Ross Ice Shelf team. The provided video frames do not contain any text or visual information that explicitly states the team size. While the video shows multiple people working at the base and on the ice, it does not provide a count.
-
-Therefore, based on the information available in the video frames, it is not possible to determine the exact number of people in the Ross Ice Shelf team.
-
-<answer>Unknown</answer>

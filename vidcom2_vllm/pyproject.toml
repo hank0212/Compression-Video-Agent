@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vidcom2-vllm"
+version = "0.1.0"
+description = "VidCom2 video-token pruning for vLLM 0.19 (out-of-tree)"
+requires-python = ">=3.10"
+
+[project.entry-points."vllm.general_plugins"]
+vidcom2 = "vidcom2_vllm.plugin:register"
+
+[tool.setuptools]
+packages = ["vidcom2_vllm"]
+
+[tool.setuptools.package-dir]
+vidcom2_vllm = "."
